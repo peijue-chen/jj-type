@@ -5,7 +5,7 @@ grammar correction via user-configured OpenAI-compatible endpoints.
 
 ## Project Facts
 
-- **Platform:** macOS 13.0+ / Swift 5 language mode / AppKit (no SwiftUI, no storyboards — all UI programmatic)
+- **Platform:** macOS 14.0+ / Swift 5 language mode / AppKit (no SwiftUI, no storyboards — all UI programmatic)
 - **App type:** LSUIElement menu-bar app (no Dock icon), Bundle ID `com.aigens.jj-type`, display name **JJType** (`CFBundleName`/`CFBundleDisplayName`; target/product stay `jj-type`)
 - **Dependencies:** ZERO third-party. System frameworks only: AppKit, Carbon (global hotkeys), CoreGraphics (CGEvent synthetic ⌘C/⌘V), Security (Keychain), URLSession, NaturalLanguage, ApplicationServices
 - **Xcode project:** uses `PBXFileSystemSynchronizedRootGroup` — files dropped into `jj-type/` are compiled automatically; **do NOT hand-register new sources in project.pbxproj**
@@ -26,9 +26,23 @@ grammar correction via user-configured OpenAI-compatible endpoints.
 | `jj-type/ResultPanelController.swift` | Reused non-activating floating panel: loading/error/result, replace/copy |
 | `jj-type/TranslationWindowController.swift` | ⌥+D input-window mode (Bob/Easydict-style): prefill-or-type, Enter/Esc equivalents, auto-copy |
 | `jj-type/main.swift` | Explicit entry point — the `@main` AppKit bootstrap is broken on this macOS 26 beta toolchain; do not switch back |
-| `jj-type/SettingsWindowController.swift` | Provider CRUD + hotkey customization UI |
+| `jj-type/SettingsWindowController.swift` | Tabbed settings (`AI 服务` / `快捷键` / `截图`): segmented header + one stack page per tab, window re-fits on tab switch; provider CRUD + connection test + hotkey customization + capture folder/format; shared footer shows the bundle version |
 | `jj-type/HotkeyRecorderView.swift` | Keyboard capture field for hotkey rebinding |
 | `jj-type/AccessibilityPermission.swift` | AXIsProcessTrusted + first-run guidance window |
+| `jj-type/ScreenCapturePermission.swift` | Screen Recording TCC (CGPreflight/CGRequest), settings pane, relaunch helper + guidance window |
+| `jj-type/ScreenCaptureService.swift` | `nonisolated`: freezes every display via `SCScreenshotManager` (macOS 14+), crops/composites the selection |
+| `jj-type/WindowSnapshot.swift` | `CGWindowListCopyWindowInfo` geometry (CG top-left → AppKit bottom-left) for window hover highlight |
+| `jj-type/CaptureOverlayController.swift` | Capture session orchestration: permission, freeze, overlays, authoritative global selection, toolbar, focus restore |
+| `jj-type/CaptureOverlayWindow.swift` | Borderless `.screenSaver`-level panel per display (can become key, joins all Spaces) |
+| `jj-type/CaptureOverlayView.swift` | Frozen frame + dim mask + selection/handles + window hover + mouse/keyboard (no magnifier: it read as a dark blob chasing the cursor) |
+| `jj-type/SelectionHandle.swift` | 8 handles: hit testing, resize/normalize/clamp geometry |
+| `jj-type/CaptureToolbarController.swift` | Floating toolbar next to the selection: 9 annotation tools, undo/redo, colour + width row, tool option row (font + size for text, alpha for highlighter), recognize / pin / save / copy / close, own hover hints, edge avoidance |
+| `jj-type/CaptureExporter.swift` | PNG/JPEG write to `~/Pictures/JJType/` + pasteboard copy |
+| `jj-type/AnnotationTool.swift` | 9 tools, fixed 6-colour palette, 3 widths, `AnnotationItem` + eraser hit testing (global points) |
+| `jj-type/AnnotationPainter.swift` | Shared CGContext/CoreText painter (view + exporter), mosaic generator, `AnnotationRenderer.compose` |
+| `jj-type/TextRecognizer.swift` | `nonisolated` Vision OCR (revision 3, zh-Hans/zh-Hant + en-US, small-crop upscale, fragment dedupe, row order) |
+| `jj-type/PinWindowController.swift` | Pinned window above the capture overlay: draggable, click-through while capturing, right-click menu (copy / save / close), close via button or Esc (NOT double-click) |
+| `jj-type/CaptureToast.swift` | Reused HUD panel for capture feedback (OCR done, copied, pinned); never key, never eats clicks, self-dismissing |
 
 ## Build Commands
 
@@ -40,7 +54,16 @@ xcodebuild -project jj-type.xcodeproj -scheme jj-type -configuration Debug build
 # build-release.sh produces a UNIVERSAL binary (x86_64 + arm64) via script-only ARCHS
 # overrides — pbxproj stays host-arch so Xcode dev builds remain fast.
 ./build-release.sh
+
+# Same build with the raw, unfiltered xcodebuild log (thousands of lines)
+VERBOSE=1 ./build-release.sh
 ```
+
+`build-release.sh` prints a readable log by default (version banner, per-arch
+compile progress, signing, warnings/errors, elapsed time, product path) — never
+`-quiet`, which makes a successful build look like nothing happened. Keep the
+`-destination 'generic/platform=macOS'` flag: without it the universal build
+spews "multiple matching destinations".
 
 Signing: `CODE_SIGN_STYLE = Automatic` + `CODE_SIGN_IDENTITY = "Apple Development"`
 + personal `DEVELOPMENT_TEAM = 36RXHYW79N` (requires that team's certificate on
@@ -48,6 +71,11 @@ the machine). Publish/notarization is pending a channel decision — do not
 switch back to ad-hoc `-` without user approval. Runtime verification (hotkeys,
 synthetic ⌘C/⌘V, panel placement) requires a real GUI session with the
 Accessibility permission granted to the built app.
+
+Screenshot capture needs a SECOND, independent TCC grant — **Screen Recording**
+(`Privacy_ScreenCapture`). macOS only applies a fresh grant at process launch, so
+after authorizing the user must relaunch the app (the guide window offers a
+button for exactly that). Never fall back to `CGWindowListCreateImage`.
 
 ## App Icon
 
@@ -65,11 +93,63 @@ Accessibility permission granted to the built app.
 - **Secrets never in code or UserDefaults** — API keys live in Keychain only.
   `mode.json` at the repo root is a local reference file; never commit it, never
   copy its key anywhere.
+- **Screenshot rules:** the overlay session owns the selection in AppKit *global*
+  coordinates (bottom-left origin) and only converts at the capture boundary;
+  screen freeze / crop / export must stay `nonisolated` (never on the main actor);
+  every repaint is a dirty rect (`setNeedsDisplay(_:)`), never the whole 5K
+  overlay. There is intentionally **no magnifier** — a 6x loupe beside the cursor
+  reads as a dark blob chasing the pointer, and the dim mask alone has to carry
+  the focus (only the selection is bright).
+- **Window levels:** overlay = `.screenSaverWindow`, pin = +1, toolbar = +2,
+  hint = +3, toast = +4. The toolbar MUST stay above the overlay: at the same
+  level a canvas click raises the full-screen overlay and the toolbar vanishes
+  behind it. Pins stay above the overlay so a new capture still shows them; they
+  set `ignoresMouseEvents` for the duration of a session, and the capture service
+  re-includes their window IDs through `exceptingWindows`. A pin drops to
+  `.floating` while its right-click menu is up — a pop-up menu is level 101 and
+  would otherwise render *under* the pin.
+- **Feedback rules:** capture actions are never silent. OCR (success and
+  no-text), copy and pin go through `CaptureToast`; only real errors use `NSAlert`.
+  Double-click inside the selection = copy **and save** + close ("keep the shot")
+  **with any tool active** (`Action.copyAndSave`: pasteboard via
+  `CaptureExporter.copyToPasteboard`, file via `onFinish(image, copied: true)`,
+  and the save handler emits ONE toast for both — never a "已复制" toast that is
+  immediately overwritten). A pending inline text edit is committed first, a
+  half-drawn stroke is dropped; a double click must never dismiss a pin.
+  Save failures distinguish the two paths ("已复制，但保存截图失败"). A pin's
+  right-click menu offers copy / save / close (right-click never closes it).
+- **Annotation rules:** annotations also store *global* points and live in
+  `CaptureOverlayController` (views only read them); drawing goes through the one
+  `AnnotationPainter` path so the overlay and the exported bitmap can never
+  diverge; flattening (`AnnotationRenderer.compose`) runs in a detached task;
+  once an annotation exists the selection is locked (no move/resize/nudge). Text
+  keeps its own `fontName` / `fontSize` (independent from the stroke widths, so a
+  40 pt label is not tied to the 7 pt pen) and the highlighter keeps its own
+  `alpha` (5 %–100 %); both are stored per item so undo/redo and export never
+  diverge. The inline text editor draws **no box and no fill** — only the glyphs
+  and a caret in the chosen colour — and `applyStyleToTextEditor` must push every
+  colour / font / size change into the live field editor (caret, existing text and
+  `typingAttributes`) immediately; the field editor's `drawsBackground` must stay
+  false or an opaque box covers the screenshot, and `endTextEditing` must restore
+  `drawsBackground` / `backgroundColor` / `insertionPointColor` (the field editor
+  is shared app-wide). While the field editor is first responder, ⌘C / ⌘S / ⌘Z
+  belong to it: `CaptureOverlayWindow.performKeyEquivalent` bails out for an
+  `NSTextView` first responder, otherwise ⌘C would copy the screenshot, close the
+  session and silently drop the half-typed annotation. Annotation dirty rects use
+  the **measured** text width (`AnnotationPainter.measuredWidth`), never a
+  per-character estimate — CJK glyphs are a full em wide.
+- **OCR rules:** Vision must run off the main actor; OCR uses the *unannotated*
+  crop, and the recognized text goes straight to the pasteboard + toast (no
+  result panel). Keep the accuracy aids: upscale small crops (≤ 640 px shortest
+  side, max 3x), newest revision, `.accurate`, language list filtered by runtime
+  support, duplicate-fragment removal, and row clustering with CJK-aware spacing.
+  Do not merge rows into paragraphs — it corrupts form labels and table rows.
 - **Performance rules:** reuse the result panel (never re-create windows); polling
   must be bounded (interval + deadline) and NSPasteboard reads stay on the main
   queue (main-thread-affine API) via async ticks — never block the main thread;
   cancel superseded Tasks (latest-wins); single shared static URLSession
-  (`AIClient.session`); write UserDefaults only on change.
+  (`AIClient.session`); write UserDefaults only on change; mosaic pixelation of a
+  frozen frame runs in a detached task (picking the tool must not block the UI).
 - **Implicitly-unwrapped optionals (`!`)** are forbidden in production paths.
   Exception: the NSWindowController convenience-init bootstrap pattern
   (`SettingsWindowController.store`) — assigned before first use, documented.
@@ -79,3 +159,26 @@ Accessibility permission granted to the built app.
 - **NEVER `git commit` / `git push`** — the user commits manually.
 - Commit message convention (when the user asks to commit):
   `<type>(<scope>): <subject>` — English, imperative, ≤72 chars.
+
+## Versioning & Changelog
+
+**Every code change ships with a version bump AND a `CHANGELOG.md` entry.**
+Do not bundle an unversioned fix into a later release.
+
+- **Version is three numbers, `MAJOR.MINOR.PATCH`** (never `1.0`):
+  - `PATCH` +1 — bug fix / refactor, no user-visible behavior change
+  - `MINOR` +1 — new feature or user-visible behavior change (PATCH back to 0)
+  - `MAJOR` +1 — incompatible change / milestone release
+- **Where the version lives** (change both, they must agree):
+  `MARKETING_VERSION` (Debug + Release in `project.pbxproj`) and
+  `CURRENT_PROJECT_VERSION` (build number, +1 on every release). `Info.plist`
+  references them as `$(MARKETING_VERSION)` / `$(CURRENT_PROJECT_VERSION)` —
+  never hard-code a version string in Swift; read it from the bundle
+  (`SettingsWindowController.versionText` renders `JJType 1.1.0 (2)`).
+- **`CHANGELOG.md`** is the human-readable "what changed": newest release on
+  top, `## [x.y.z] — YYYY-MM-DD`, grouped as `Added` / `Changed` / `Fixed` /
+  `Removed`. Write what the user sees (Chinese, like the UI), not the diff.
+- **Procedure for any task that changes behavior:** pick the bump → update
+  `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` → add the CHANGELOG section →
+  build → done. A CHANGELOG entry without the matching build-setting change (or
+  the reverse) is a defect.

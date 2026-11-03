@@ -83,7 +83,10 @@ final class TextCaptureService {
         var focusedRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString,
                                             &focusedRef) == .success,
-              let focusedValue = focusedRef else {
+              // The value comes from another process: verify the CF type before
+              // the cast, so a misbehaving app cannot crash us.
+              let focusedValue = focusedRef,
+              CFGetTypeID(focusedValue) == AXUIElementGetTypeID() else {
             return .unavailable
         }
         let focused = focusedValue as! AXUIElement

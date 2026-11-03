@@ -12,7 +12,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let store = SettingsStore()
         settingsStore = store
         hotkeyManager = HotkeyManager(translate: store.translateHotkey,
-                                      correct: store.correctHotkey)
+                                      correct: store.correctHotkey,
+                                      capture: store.captureHotkey)
         super.init()
     }
 
@@ -22,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let hotkeyManager: HotkeyManager
     private let textCapture = TextCaptureService()
     private let aiClient = AIClient()
+    private let captureOverlay = CaptureOverlayController()
 
     private var resultPanel: ResultPanelController?
     private var translationWindow: TranslationWindowController?
@@ -50,6 +52,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         hotkeyManager.onCorrectAndTranslate = { [weak self] in
             MainActor.assumeIsolated { self?.runPipeline(mode: .correctAndTranslate) }
+        }
+        hotkeyManager.onCapture = { [weak self] in
+            MainActor.assumeIsolated { self?.runCaptureFlow() }
+        }
+
+        captureOverlay.onFinish = { [weak self] image, copied in
+            self?.saveCapturedImage(image, alsoCopied: copied)
+        }
+
+        // Pinned images save through their right-click menu, to the same place.
+        let store = settingsStore
+        PinWindowController.saveSettings = {
+            (directory: store.captureSaveDirectory, format: store.captureFormat)
         }
 
         // LSUIElement apps get no main menu — install one with a standard Edit menu
@@ -135,8 +150,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         menu.addItem(.separator())
+        menu.addItem(withTitle: "截图  \(settingsStore.captureHotkey.displayText)",
+                     action: #selector(startCapture), keyEquivalent: "").target = self
+        menu.addItem(.separator())
         menu.addItem(withTitle: "设置…", action: #selector(openSettings), keyEquivalent: ",").target = self
         menu.addItem(withTitle: "辅助功能权限引导", action: #selector(openAccessibilityGuide),
+                     keyEquivalent: "").target = self
+        menu.addItem(withTitle: "屏幕录制权限引导", action: #selector(openScreenCaptureGuide),
                      keyEquivalent: "").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "退出 jj-type", action: #selector(quit), keyEquivalent: "q").target = self
@@ -160,6 +180,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openAccessibilityGuide() {
         AccessibilityGuideWindowController.shared.showIfNeeded(force: true)
+    }
+
+    @objc private func openScreenCaptureGuide() {
+        ScreenCaptureGuideWindowController.shared.showIfNeeded(force: true)
     }
 
     @objc private func quit() {
@@ -327,21 +351,81 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ?? "请求失败：\(error.localizedDescription)"
     }
 
+    // MARK: - Screenshot
+
+    /// ⌘⇧2 flow: permission gate → freeze screens → selection overlay.
+    private func runCaptureFlow() {
+        guard ScreenCapturePermission.isGranted else {
+            ScreenCapturePermission.request()
+            ScreenCaptureGuideWindowController.shared.showIfNeeded(force: true)
+            return
+        }
+        Task { await captureOverlay.begin() }
+    }
+
+    @objc private func startCapture() {
+        runCaptureFlow()
+    }
+
+    /// The overlay already closed; only the disk write is left. `alsoCopied` is
+    /// true for the double-click path (the image is already on the pasteboard),
+    /// so a single toast can report both outcomes.
+    private func saveCapturedImage(_ image: CGImage, alsoCopied: Bool) {
+        let directory = settingsStore.captureSaveDirectory
+        let format = settingsStore.captureFormat
+        Task {
+            do {
+                let url = try await Task.detached(priority: .userInitiated) { [image] in
+                    try CaptureExporter.save(image, to: directory, format: format)
+                }.value
+                CaptureToast.shared.show(alsoCopied
+                                         ? "已复制并保存 · \(url.lastPathComponent)"
+                                         : "已保存 · \(url.lastPathComponent)",
+                                         symbol: alsoCopied ? "doc.on.doc"
+                                                            : "square.and.arrow.down")
+            } catch {
+                NSApp.activate(ignoringOtherApps: true)
+                let alert = NSAlert()
+                alert.messageText = alsoCopied ? "已复制，但保存截图失败" : "保存截图失败"
+                let reason = (error as? LocalizedError)?.errorDescription
+                    ?? error.localizedDescription
+                alert.informativeText = alsoCopied
+                    ? "图片已在剪贴板，写入文件时出错：\(reason)"
+                    : reason
+                alert.runModal()
+            }
+        }
+    }
+
     // MARK: - Hotkey changes
 
-    /// Re-registers both hotkeys with REAL conflict detection via reregister()'s result.
+    /// Re-registers all hotkeys with REAL conflict detection via reregister()'s result.
     /// Triggered at launch (W1) and whenever SettingsStore persists a new binding (C1).
     private func reregisterHotkeys() {
         if let failed = hotkeyManager.reregister(translate: settingsStore.translateHotkey,
-                                                 correct: settingsStore.correctHotkey) {
-            let name = failed == .translate ? "翻译" : "纠正+翻译"
-            let hotkey = failed == .translate ? settingsStore.translateHotkey : settingsStore.correctHotkey
+                                                 correct: settingsStore.correctHotkey,
+                                                 capture: settingsStore.captureHotkey) {
+            let name: String
+            let hotkey: Hotkey
+            switch failed {
+            case .translate:
+                name = "翻译"
+                hotkey = settingsStore.translateHotkey
+            case .correctAndTranslate:
+                name = "纠正+翻译"
+                hotkey = settingsStore.correctHotkey
+            case .capture:
+                name = "截图"
+                hotkey = settingsStore.captureHotkey
+            }
             let alert = NSAlert()
             alert.messageText = "快捷键注册失败"
-            // reregister is all-or-nothing: a failing binding unregisters BOTH hotkeys.
+            // reregister is all-or-nothing: a failing binding unregisters ALL hotkeys.
             alert.informativeText = "「\(name)」的 \(hotkey.displayText) 可能与其他应用冲突，请换一个组合键。" +
-                "（两个快捷键目前已全部注销，更换后即恢复）"
+                "（三个快捷键目前已全部注销，更换后即恢复）"
             alert.runModal()
         }
+        // The status menu shows the current capture binding.
+        rebuildStatusMenu()
     }
 }

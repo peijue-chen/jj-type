@@ -32,6 +32,9 @@ final class SettingsStore {
         static let activeProviderId = "jjtype.activeProviderId"
         static let hotkeyTranslate = "jjtype.hotkey.translate"
         static let hotkeyCorrect = "jjtype.hotkey.correct"
+        static let hotkeyCapture = "jjtype.hotkey.capture"
+        static let captureSaveDirectory = "jjtype.capture.saveDirectory"
+        static let captureFormat = "jjtype.capture.format"
         static let accessibilityGuided = "jjtype.guided.accessibility"
     }
 
@@ -72,6 +75,45 @@ final class SettingsStore {
     var correctHotkey: Hotkey {
         get { hotkey(forKey: Key.hotkeyCorrect) ?? .defaultCorrect }
         set { saveHotkey(newValue, forKey: Key.hotkeyCorrect); onHotkeyChanged?() }
+    }
+
+    var captureHotkey: Hotkey {
+        get { hotkey(forKey: Key.hotkeyCapture) ?? .defaultCapture }
+        set { saveHotkey(newValue, forKey: Key.hotkeyCapture); onHotkeyChanged?() }
+    }
+
+    // MARK: - Screenshot settings
+
+    /// Defaults to ~/Pictures/JJType; created lazily when the first shot is saved.
+    var captureSaveDirectory: URL {
+        get {
+            if let path = defaults.string(forKey: Key.captureSaveDirectory), !path.isEmpty {
+                return URL(fileURLWithPath: path, isDirectory: true)
+            }
+            return Self.defaultCaptureDirectory
+        }
+        set {
+            guard newValue.path != captureSaveDirectory.path else { return }
+            defaults.set(newValue.path, forKey: Key.captureSaveDirectory)
+        }
+    }
+
+    var captureFormat: CaptureFormat {
+        get {
+            guard let raw = defaults.string(forKey: Key.captureFormat),
+                  let format = CaptureFormat(rawValue: raw) else { return .png }
+            return format
+        }
+        set {
+            guard newValue != captureFormat else { return }
+            defaults.set(newValue.rawValue, forKey: Key.captureFormat)
+        }
+    }
+
+    private static var defaultCaptureDirectory: URL {
+        let pictures = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        return pictures.appendingPathComponent("JJType", isDirectory: true)
     }
 
     // MARK: - Providers

@@ -2,8 +2,12 @@
 //  SettingsWindowController.swift
 //  jj-type
 //
-//  Settings UI: provider CRUD (name / base URL / API key / model) with an
-//  inline connection test, active provider selection and hotkey customization.
+//  Settings UI, split into pages (AI 服务 / 快捷键 / 截图) behind a segmented
+//  header: provider CRUD (name / base URL / API key / model) with an inline
+//  connection test, active provider selection, hotkey customization and the
+//  screenshot output folder / format. New feature areas become new pages.
+//  A shared footer shows the running version (MAJOR.MINOR.PATCH, from the
+//  bundle) on every page.
 //
 
 import AppKit
@@ -23,8 +27,33 @@ final class SettingsWindowController: NSWindowController {
     private let activeButton = NSButton(checkboxWithTitle: "设为当前使用", target: nil, action: nil)
     private var editingProviderId: UUID?
 
+    // MARK: - Tabs
+    //
+    // One page per feature group. Adding a feature area = add a title here and a
+    // matching `make…Page()` in `buildLayout`; nothing else has to change.
+
+    private let sectionControl = NSSegmentedControl(labels: ["AI 服务", "快捷键", "截图"],
+                                                    trackingMode: .selectOne,
+                                                    target: nil,
+                                                    action: nil)
+    private let pageContainer = NSView()
+    private var pages: [NSView] = []
+    private weak var currentPage: NSView?
+    private var pageConstraints: [NSLayoutConstraint] = []
+    /// Version footer: shared by every page so the running build is always one
+    /// glance away (three-part version, straight from the bundle).
+    private let versionLabel = NSTextField(labelWithString: "")
+
+    /// Every page uses the same content width, so the window does not change
+    /// width when a tab is switched.
+    private static let pageWidth: CGFloat = 520
+    private static let pageMargin: CGFloat = 20
+
     private var translateRecorder: HotkeyRecorderView?
     private var correctRecorder: HotkeyRecorderView?
+    private var captureRecorder: HotkeyRecorderView?
+    private let captureDirectoryLabel = NSTextField(labelWithString: "")
+    private let captureFormatPopup = NSPopUpButton()
 
     convenience init(store: SettingsStore) {
         // No fixed final frame — the content view is fully constraint-driven and
@@ -46,15 +75,78 @@ final class SettingsWindowController: NSWindowController {
         reloadForm()
         // Constraints were added AFTER the contentViewController assignment, so the
         // window kept the content view's initial frame — snap it to the real fitting
-        // size now that layout is fully defined.
-        window.setContentSize(content.fittingSize)
+        // size of the visible tab now that layout is fully defined.
+        resizeWindowToFit()
     }
 
     // MARK: - Layout
 
     private func buildLayout(in view: NSView) {
-        let providersTitle = sectionTitle("AI 服务（OpenAI 兼容）")
+        sectionControl.target = self
+        sectionControl.action = #selector(sectionChanged)
+        sectionControl.segmentStyle = .rounded
+        sectionControl.selectedSegment = 0
+        sectionControl.translatesAutoresizingMaskIntoConstraints = false
+        for index in 0..<sectionControl.segmentCount {
+            sectionControl.setWidth(96, forSegment: index)
+        }
 
+        pageContainer.translatesAutoresizingMaskIntoConstraints = false
+
+        versionLabel.stringValue = Self.versionText
+        versionLabel.font = .systemFont(ofSize: 11)
+        versionLabel.textColor = .tertiaryLabelColor
+        versionLabel.alignment = .right
+        versionLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        let margin = Self.pageMargin
+        view.addSubview(sectionControl)
+        view.addSubview(pageContainer)
+        view.addSubview(versionLabel)
+        NSLayoutConstraint.activate([
+            sectionControl.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: margin),
+            sectionControl.topAnchor.constraint(equalTo: view.topAnchor, constant: 16),
+            sectionControl.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor,
+                                                     constant: -margin),
+            pageContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: margin),
+            pageContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -margin),
+            pageContainer.topAnchor.constraint(equalTo: sectionControl.bottomAnchor, constant: 16),
+            // Footer sits below the page and is part of the fitting size, so the
+            // height recalculation on tab switch keeps it pinned to the bottom.
+            pageContainer.bottomAnchor.constraint(equalTo: versionLabel.topAnchor, constant: -10),
+            versionLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -margin),
+            versionLabel.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -10),
+        ])
+
+        pages = [makeProvidersPage(), makeHotkeyPage(), makeCapturePage()]
+        if let first = pages.first {
+            show(page: first)
+        }
+    }
+
+    /// A page is a vertical stack pinned to the container; the window height is
+    /// derived from its fitting size, so a new row can never be clipped.
+    private func makePage(_ views: [NSView]) -> NSStackView {
+        let stack = NSStackView(views: views)
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 12
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        return stack
+    }
+
+    private func makeHint(_ text: String) -> NSTextField {
+        let hint = NSTextField(wrappingLabelWithString: text)
+        hint.font = .systemFont(ofSize: 11)
+        hint.textColor = .secondaryLabelColor
+        hint.widthAnchor.constraint(equalToConstant: Self.pageWidth).isActive = true
+        return hint
+    }
+
+    // MARK: - Pages
+
+    /// Page 1: OpenAI-compatible provider CRUD.
+    private func makeProvidersPage() -> NSStackView {
         let tableColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("provider"))
         tableColumn.title = "服务"
         tableView.addTableColumn(tableColumn)
@@ -70,6 +162,8 @@ final class SettingsWindowController: NSWindowController {
 
         let addButton = NSButton(title: "新建", target: self, action: #selector(addProvider))
         let deleteButton = NSButton(title: "删除", target: self, action: #selector(deleteProvider))
+        let listRow = NSStackView(views: [addButton, deleteButton])
+        listRow.spacing = 8
 
         let formGrid = NSGridView(views: [
             [formLabel("名称"), nameField],
@@ -94,53 +188,132 @@ final class SettingsWindowController: NSWindowController {
         activeButton.target = self
         activeButton.action = #selector(toggleActive(_:))
 
-        let hotkeyTitle = sectionTitle("快捷键")
-        let translate = HotkeyRecorderView(label: "翻译", hotkey: store.translateHotkey)
-        let correct = HotkeyRecorderView(label: "纠正 + 翻译", hotkey: store.correctHotkey)
-        translate.onHotkeyChanged = { [weak self] hotkey in self?.applyHotkey(.translate, hotkey) }
-        correct.onHotkeyChanged = { [weak self] hotkey in self?.applyHotkey(.correctAndTranslate, hotkey) }
-        translateRecorder = translate
-        correctRecorder = correct
-        let hotkeyHint = NSTextField(wrappingLabelWithString: "点击输入框后直接按下新组合键；需包含 ⌘/⌥/⌃ 至少一个修饰键。")
-        hotkeyHint.font = .systemFont(ofSize: 11)
-        hotkeyHint.textColor = .secondaryLabelColor
-
         let actionRow = NSStackView(views: [saveButton, testButton, activeButton])
         actionRow.spacing = 12
 
-        let stack = NSStackView(views: [
-            providersTitle, scroll,
-            NSStackView(views: [addButton, deleteButton]),
-            formGrid, actionRow, testResultLabel,
-            hotkeyTitle, translate, correct, hotkeyHint,
-        ])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 12
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
-            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
-            stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 16),
-            // EQUAL (not lessThanOrEqual): the window must grow to fit every row.
-            stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16),
-            scroll.heightAnchor.constraint(equalToConstant: 110),
-            scroll.widthAnchor.constraint(equalToConstant: 300),
-            nameField.widthAnchor.constraint(equalToConstant: 300),
+            scroll.heightAnchor.constraint(equalToConstant: 120),
+            scroll.widthAnchor.constraint(equalToConstant: Self.pageWidth),
+        ])
+
+        return makePage([
+            makeHint("OpenAI 兼容接口：Base URL 需含 /v1，API Key 只保存在系统钥匙串。"),
+            scroll, listRow, formGrid, actionRow, testResultLabel,
         ])
     }
 
-    private func sectionTitle(_ text: String) -> NSTextField {
-        let field = NSTextField(labelWithString: text)
-        field.font = .systemFont(ofSize: 14, weight: .semibold)
-        return field
+    /// Page 2: global hotkey rebinding.
+    private func makeHotkeyPage() -> NSStackView {
+        let translate = HotkeyRecorderView(label: "翻译", hotkey: store.translateHotkey)
+        let correct = HotkeyRecorderView(label: "纠正 + 翻译", hotkey: store.correctHotkey)
+        let capture = HotkeyRecorderView(label: "截图", hotkey: store.captureHotkey)
+        translate.onHotkeyChanged = { [weak self] hotkey in self?.applyHotkey(.translate, hotkey) }
+        correct.onHotkeyChanged = { [weak self] hotkey in self?.applyHotkey(.correctAndTranslate, hotkey) }
+        capture.onHotkeyChanged = { [weak self] hotkey in self?.applyHotkey(.capture, hotkey) }
+        translateRecorder = translate
+        correctRecorder = correct
+        captureRecorder = capture
+
+        return makePage([
+            translate, correct, capture,
+            makeHint("点击输入框后直接按下新组合键；需包含 ⌘/⌥/⌃ 至少一个修饰键。"),
+        ])
+    }
+
+    /// Page 3: screenshot output (folder / format).
+    private func makeCapturePage() -> NSStackView {
+        makePage([
+            buildCaptureGrid(),
+            makeHint("截图需要「屏幕录制」权限；首次授权后需重启 JJType 才会生效。"),
+        ])
+    }
+
+    // MARK: - Tab switching
+
+    @objc private func sectionChanged() {
+        let index = sectionControl.selectedSegment
+        guard index >= 0, index < pages.count else { return }
+        show(page: pages[index])
+        resizeWindowToFit()
+    }
+
+    private func show(page: NSView) {
+        guard page !== currentPage else { return }
+        // Explicit deactivate: AppKit's cleanup of constraints that reference a
+        // removed subview is not something to depend on.
+        NSLayoutConstraint.deactivate(pageConstraints)
+        pageConstraints = [
+            page.leadingAnchor.constraint(equalTo: pageContainer.leadingAnchor),
+            page.trailingAnchor.constraint(equalTo: pageContainer.trailingAnchor),
+            page.topAnchor.constraint(equalTo: pageContainer.topAnchor),
+            // EQUAL (not lessThanOrEqual): the window must grow to fit every row.
+            page.bottomAnchor.constraint(equalTo: pageContainer.bottomAnchor),
+        ]
+        currentPage?.removeFromSuperview()
+        pageContainer.addSubview(page)
+        NSLayoutConstraint.activate(pageConstraints)
+        currentPage = page
+    }
+
+    /// Each tab has its own height: resize the window and keep its top edge in
+    /// place so the title bar does not jump when switching.
+    private func resizeWindowToFit() {
+        guard let window, let content = window.contentView else { return }
+        content.layoutSubtreeIfNeeded()
+        let fitting = content.fittingSize
+        let size = NSSize(width: max(Self.pageWidth + Self.pageMargin * 2, fitting.width),
+                          height: max(160, fitting.height))
+        let top = window.frame.maxY
+        window.setContentSize(size)
+        var frame = window.frame
+        frame.origin.y = top - frame.height
+        window.setFrame(frame, display: true)
+    }
+
+    /// `JJType 1.1.0 (2)` — three-part marketing version plus the build number.
+    /// Both come from the bundle (MARKETING_VERSION / CURRENT_PROJECT_VERSION),
+    /// never from a hard-coded literal that could drift from the build.
+    private static var versionText: String {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "—"
+        guard let build = info?["CFBundleVersion"] as? String, !build.isEmpty else {
+            return "JJType \(version)"
+        }
+        return "JJType \(version) (\(build))"
     }
 
     private func formLabel(_ text: String) -> NSTextField {
         let field = NSTextField(labelWithString: text)
         field.font = .systemFont(ofSize: 12)
         return field
+    }
+
+    /// Screenshot section: folder picker + image format.
+    private func buildCaptureGrid() -> NSGridView {
+        captureDirectoryLabel.font = .systemFont(ofSize: 12)
+        captureDirectoryLabel.textColor = .secondaryLabelColor
+        captureDirectoryLabel.lineBreakMode = .byTruncatingMiddle
+        captureDirectoryLabel.stringValue = store.captureSaveDirectory.path
+        captureDirectoryLabel.widthAnchor.constraint(equalToConstant: 210).isActive = true
+
+        let chooseButton = NSButton(title: "选择…", target: self, action: #selector(chooseCaptureDirectory))
+        chooseButton.bezelStyle = .rounded
+
+        captureFormatPopup.addItems(withTitles: CaptureFormat.allCases.map { $0.displayName })
+        if let index = CaptureFormat.allCases.firstIndex(of: store.captureFormat) {
+            captureFormatPopup.selectItem(at: index)
+        }
+        captureFormatPopup.target = self
+        captureFormatPopup.action = #selector(captureFormatChanged)
+
+        let grid = NSGridView(views: [
+            [formLabel("保存目录"), captureDirectoryLabel, chooseButton],
+            [formLabel("图片格式"), captureFormatPopup, NSGridCell.emptyContentView],
+        ])
+        grid.column(at: 0).xPlacement = .trailing
+        grid.rowSpacing = 8
+        grid.translatesAutoresizingMaskIntoConstraints = false
+        return grid
     }
 
     // MARK: - Data binding
@@ -299,20 +472,57 @@ final class SettingsWindowController: NSWindowController {
 
     /// C1 fix: persist via the store setter so SettingsStore fires onHotkeyChanged
     /// → AppDelegate.reregisterHotkeys() performs REAL conflict detection and alerts.
-    /// W2 fix: reject a binding identical to the other action's.
+    /// W2 fix: reject a binding already used by any other action.
     private func applyHotkey(_ id: HotkeyManager.HotkeyID, _ hotkey: Hotkey) {
-        let other = id == .translate ? store.correctHotkey : store.translateHotkey
-        let recorder = id == .translate ? translateRecorder : correctRecorder
-        if hotkey == other {
-            recorder?.reject("与另一功能快捷键重复，请换一个组合键")
+        let others: [Hotkey]
+        switch id {
+        case .translate:
+            others = [store.correctHotkey, store.captureHotkey]
+        case .correctAndTranslate:
+            others = [store.translateHotkey, store.captureHotkey]
+        case .capture:
+            others = [store.translateHotkey, store.correctHotkey]
+        }
+        guard let recorder = recorder(for: id) else { return }
+        if others.contains(hotkey) {
+            recorder.reject("与其它功能快捷键重复，请换一个组合键")
             return
         }
-        if id == .translate {
+        switch id {
+        case .translate:
             store.translateHotkey = hotkey
-        } else {
+        case .correctAndTranslate:
             store.correctHotkey = hotkey
+        case .capture:
+            store.captureHotkey = hotkey
         }
-        recorder?.accept()
+        recorder.accept()
+    }
+
+    private func recorder(for id: HotkeyManager.HotkeyID) -> HotkeyRecorderView? {
+        switch id {
+        case .translate: return translateRecorder
+        case .correctAndTranslate: return correctRecorder
+        case .capture: return captureRecorder
+        }
+    }
+
+    @objc private func chooseCaptureDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.directoryURL = store.captureSaveDirectory
+        panel.prompt = "选择"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        store.captureSaveDirectory = url
+        captureDirectoryLabel.stringValue = store.captureSaveDirectory.path
+    }
+
+    @objc private func captureFormatChanged() {
+        let index = captureFormatPopup.indexOfSelectedItem
+        guard index >= 0, index < CaptureFormat.allCases.count else { return }
+        store.captureFormat = CaptureFormat.allCases[index]
     }
 
     private func showAlert(_ title: String, _ message: String) {

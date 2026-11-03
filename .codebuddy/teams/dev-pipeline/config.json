@@ -1,0 +1,21 @@
+{
+  "name": "dev-pipeline",
+  "leadAgentId": "76ebefb4c90f4c8b8709b0ca25386c0d",
+  "workspacePath": "/Users/chenpeijue/Desktop/jj-type",
+  "createdAt": "2026-10-30T02:26:05.999Z",
+  "options": {
+    "workspacePath": "/Users/chenpeijue/Desktop/jj-type"
+  },
+  "members": [
+    {
+      "memberId": "team-lead@dev-pipeline",
+      "name": "team-lead",
+      "role": "Team Lead - coordinates the team and interacts with the user"
+    },
+    {
+      "memberId": "coder@dev-pipeline",
+      "name": "coder",
+      "role": "Coder: plan jj-type macOS app"
+    }
+  ]
+}

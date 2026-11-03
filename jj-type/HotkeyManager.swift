@@ -15,6 +15,8 @@ struct Hotkey: Codable, Equatable {
 
     static let defaultTranslate = Hotkey(keyCode: UInt32(kVK_ANSI_D), modifierFlags: NSEvent.ModifierFlags.option.rawValue)
     static let defaultCorrect = Hotkey(keyCode: UInt32(kVK_ANSI_E), modifierFlags: NSEvent.ModifierFlags.option.rawValue)
+    static let defaultCapture = Hotkey(keyCode: UInt32(kVK_ANSI_2),
+                                       modifierFlags: NSEvent.ModifierFlags([.command, .shift]).rawValue)
 
     var carbonModifiers: UInt32 {
         var carbon: UInt32 = 0
@@ -69,6 +71,7 @@ final class HotkeyManager {
     enum HotkeyID: UInt32 {
         case translate = 1
         case correctAndTranslate = 2
+        case capture = 3
 
         var signature: OSType {
             // 'jjty' — matches the registered EventHotKeyID signature.
@@ -78,16 +81,20 @@ final class HotkeyManager {
 
     var onTranslate: (() -> Void)?
     var onCorrectAndTranslate: (() -> Void)?
+    var onCapture: (() -> Void)?
 
     private var translateRef: EventHotKeyRef?
     private var correctRef: EventHotKeyRef?
+    private var captureRef: EventHotKeyRef?
     private var translateHotkey: Hotkey
     private var correctHotkey: Hotkey
+    private var captureHotkey: Hotkey
     private var handlerInstalled = false
 
-    init(translate: Hotkey, correct: Hotkey) {
+    init(translate: Hotkey, correct: Hotkey, capture: Hotkey) {
         translateHotkey = translate
         correctHotkey = correct
+        captureHotkey = capture
         installCarbonHandler()
         // Registration is intentionally NOT done here: the caller must consume
         // reregister()'s conflict result (see AppDelegate.applicationDidFinishLaunching).
@@ -97,21 +104,27 @@ final class HotkeyManager {
         unregisterAll()
     }
 
-    /// Re-registers both hotkeys. Returns the HotkeyID that failed to register (conflict), nil on success.
+    /// Re-registers all hotkeys. Returns the HotkeyID that failed to register
+    /// (conflict), nil on success. All-or-nothing: a failure unregisters everything.
     @discardableResult
-    func reregister(translate: Hotkey, correct: Hotkey) -> HotkeyID? {
+    func reregister(translate: Hotkey, correct: Hotkey, capture: Hotkey) -> HotkeyID? {
         unregisterAll()
         translateHotkey = translate
         correctHotkey = correct
+        captureHotkey = capture
 
-        if register(&translateRef, id: .translate, hotkey: translate) {
-            if register(&correctRef, id: .correctAndTranslate, hotkey: correct) {
-                return nil
-            }
+        guard register(&translateRef, id: .translate, hotkey: translate) else {
+            return .translate
+        }
+        guard register(&correctRef, id: .correctAndTranslate, hotkey: correct) else {
             unregisterAll()
             return .correctAndTranslate
         }
-        return .translate
+        guard register(&captureRef, id: .capture, hotkey: capture) else {
+            unregisterAll()
+            return .capture
+        }
+        return nil
     }
 
     // MARK: - Carbon bridge
@@ -129,6 +142,7 @@ final class HotkeyManager {
     private func unregisterAll() {
         if let ref = translateRef { UnregisterEventHotKey(ref); translateRef = nil }
         if let ref = correctRef { UnregisterEventHotKey(ref); correctRef = nil }
+        if let ref = captureRef { UnregisterEventHotKey(ref); captureRef = nil }
     }
 
     private func installCarbonHandler() {
@@ -150,11 +164,14 @@ final class HotkeyManager {
     fileprivate func dispatch(id: UInt32) {
         // Carbon handler is nonisolated; hop back to the main actor for UI work.
         MainActor.assumeIsolated {
-            guard HotkeyID(rawValue: id) == .translate || HotkeyID(rawValue: id) == .correctAndTranslate else { return }
-            if id == HotkeyID.translate.rawValue {
+            guard let hotkeyID = HotkeyID(rawValue: id) else { return }
+            switch hotkeyID {
+            case .translate:
                 onTranslate?()
-            } else {
+            case .correctAndTranslate:
                 onCorrectAndTranslate?()
+            case .capture:
+                onCapture?()
             }
         }
     }
