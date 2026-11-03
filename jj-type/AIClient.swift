@@ -118,10 +118,13 @@ final class AIClient {
     @discardableResult
     func testConnection(provider: ProviderConfig, apiKey: String) async throws -> Int {
         let started = Date()
-        let completion = try await attempt(provider: provider, apiKey: apiKey,
-                                           messages: [Message(role: "user",
-                                                              content: "Reply with exactly: OK")],
-                                           maxTokens: 256, timeout: 10)
+        // Plain text probe on purpose: JSON mode is unnecessary here, and strict
+        // OpenAI-compatible servers reject `response_format: json_object` unless
+        // the messages ask for JSON — that cost a guaranteed 400 + retry per test.
+        let completion = try await send(provider: provider, apiKey: apiKey,
+                                        messages: [Message(role: "user",
+                                                           content: "Reply with exactly: OK")],
+                                        responseFormat: nil, maxTokens: 256, timeout: 10)
         guard !completion.text.isEmpty else {
             throw AIError.noValidResult(truncated: completion.finishReason == "length")
         }

@@ -17,6 +17,9 @@ struct Hotkey: Codable, Equatable {
     static let defaultCorrect = Hotkey(keyCode: UInt32(kVK_ANSI_E), modifierFlags: NSEvent.ModifierFlags.option.rawValue)
     static let defaultCapture = Hotkey(keyCode: UInt32(kVK_ANSI_2),
                                        modifierFlags: NSEvent.ModifierFlags([.command, .shift]).rawValue)
+    /// Launcher: ⌥O ("open"). Deliberately NOT ⌥Space, which is Alfred's own
+    /// default — the two apps are expected to live side by side.
+    static let defaultLauncher = Hotkey(keyCode: UInt32(kVK_ANSI_O), modifierFlags: NSEvent.ModifierFlags.option.rawValue)
 
     var carbonModifiers: UInt32 {
         var carbon: UInt32 = 0
@@ -46,8 +49,20 @@ struct Hotkey: Codable, Equatable {
         return flags.contains(.command) || flags.contains(.option) || flags.contains(.control)
     }
 
+    /// Keys that carry no character; `UCKeyTranslate` would render them as the
+    /// useless "Key 49" fallback.
+    private static let specialKeyNames: [Int: String] = [
+        kVK_Space: "Space", kVK_Return: "⏎", kVK_ANSI_KeypadEnter: "⌤", kVK_Tab: "⇥",
+        kVK_Delete: "⌫", kVK_ForwardDelete: "⌦",
+        kVK_LeftArrow: "←", kVK_RightArrow: "→", kVK_UpArrow: "↑", kVK_DownArrow: "↓",
+        kVK_Home: "↖", kVK_End: "↘", kVK_PageUp: "⇞", kVK_PageDown: "⇟",
+        kVK_F1: "F1", kVK_F2: "F2", kVK_F3: "F3", kVK_F4: "F4", kVK_F5: "F5", kVK_F6: "F6",
+        kVK_F7: "F7", kVK_F8: "F8", kVK_F9: "F9", kVK_F10: "F10", kVK_F11: "F11", kVK_F12: "F12",
+    ]
+
     /// Maps a virtual key code to its unshifted letter/symbol for display.
     static func letter(forKeyCode keyCode: UInt32) -> String {
+        if let name = specialKeyNames[Int(keyCode)] { return name }
         // Load the current keyboard layout and translate the key code without modifiers.
         var deadKeyState: UInt32 = 0
         var chars = [UniChar](repeating: 0, count: 4)
@@ -68,81 +83,71 @@ struct Hotkey: Codable, Equatable {
 }
 
 final class HotkeyManager {
-    enum HotkeyID: UInt32 {
+    enum HotkeyID: UInt32, CaseIterable {
         case translate = 1
         case correctAndTranslate = 2
         case capture = 3
-
-        var signature: OSType {
-            // 'jjty' — matches the registered EventHotKeyID signature.
-            0x6A_6A_74_79
-        }
+        case launcher = 4
     }
+
+    /// Dynamic ids (launch items) start here so they can never collide with the
+    /// three built-in actions.
+    static let launchItemSlotRange: ClosedRange<UInt32> = 100...999
+
+    /// 'jjty' — matches the registered EventHotKeyID signature.
+    private static let signature: OSType = 0x6A_6A_74_79
 
     var onTranslate: (() -> Void)?
     var onCorrectAndTranslate: (() -> Void)?
     var onCapture: (() -> Void)?
+    var onLauncher: (() -> Void)?
+    /// Fires with the launch item's own hotkey slot (see `launchItemSlotRange`).
+    var onLaunchItem: ((UInt32) -> Void)?
 
-    private var translateRef: EventHotKeyRef?
-    private var correctRef: EventHotKeyRef?
-    private var captureRef: EventHotKeyRef?
-    private var translateHotkey: Hotkey
-    private var correctHotkey: Hotkey
-    private var captureHotkey: Hotkey
+    private var refs: [UInt32: EventHotKeyRef] = [:]
     private var handlerInstalled = false
 
-    init(translate: Hotkey, correct: Hotkey, capture: Hotkey) {
-        translateHotkey = translate
-        correctHotkey = correct
-        captureHotkey = capture
+    init() {
         installCarbonHandler()
         // Registration is intentionally NOT done here: the caller must consume
-        // reregister()'s conflict result (see AppDelegate.applicationDidFinishLaunching).
+        // reregister()'s conflict results (see AppDelegate.applicationDidFinishLaunching).
     }
 
     deinit {
         unregisterAll()
     }
 
-    /// Re-registers all hotkeys. Returns the HotkeyID that failed to register
-    /// (conflict), nil on success. All-or-nothing: a failure unregisters everything.
+    /// Registers exactly this set of bindings, replacing whatever was registered
+    /// before (built-in actions *and* launch items). Ids whose combination is
+    /// already taken by another app stay unregistered and come back in the
+    /// result, so the caller can name them; the rest are live either way.
     @discardableResult
-    func reregister(translate: Hotkey, correct: Hotkey, capture: Hotkey) -> HotkeyID? {
+    func reregister(_ bindings: [UInt32: Hotkey]) -> [UInt32] {
         unregisterAll()
-        translateHotkey = translate
-        correctHotkey = correct
-        captureHotkey = capture
-
-        guard register(&translateRef, id: .translate, hotkey: translate) else {
-            return .translate
+        var failed: [UInt32] = []
+        for (id, hotkey) in bindings where !register(id: id, hotkey: hotkey) {
+            failed.append(id)
         }
-        guard register(&correctRef, id: .correctAndTranslate, hotkey: correct) else {
-            unregisterAll()
-            return .correctAndTranslate
-        }
-        guard register(&captureRef, id: .capture, hotkey: capture) else {
-            unregisterAll()
-            return .capture
-        }
-        return nil
+        return failed.sorted()
     }
 
     // MARK: - Carbon bridge
 
-    private func register(_ ref: inout EventHotKeyRef?, id: HotkeyID, hotkey: Hotkey) -> Bool {
-        let hotKeyID = EventHotKeyID(signature: id.signature, id: id.rawValue)
+    private func register(id: UInt32, hotkey: Hotkey) -> Bool {
+        let hotKeyID = EventHotKeyID(signature: Self.signature, id: id)
         var newRef: EventHotKeyRef?
         let status = RegisterEventHotKey(hotkey.keyCode, hotkey.carbonModifiers, hotKeyID,
                                          GetApplicationEventTarget(), 0, &newRef)
-        guard status == noErr, newRef != nil else { return false }
-        ref = newRef
+        guard status == noErr, let newRef else { return false }
+        refs[id] = newRef
         return true
     }
 
     private func unregisterAll() {
-        if let ref = translateRef { UnregisterEventHotKey(ref); translateRef = nil }
-        if let ref = correctRef { UnregisterEventHotKey(ref); correctRef = nil }
-        if let ref = captureRef { UnregisterEventHotKey(ref); captureRef = nil }
+        for (_, ref) in refs {
+            UnregisterEventHotKey(ref)
+        }
+        refs.removeAll()
     }
 
     private func installCarbonHandler() {
@@ -164,14 +169,19 @@ final class HotkeyManager {
     fileprivate func dispatch(id: UInt32) {
         // Carbon handler is nonisolated; hop back to the main actor for UI work.
         MainActor.assumeIsolated {
-            guard let hotkeyID = HotkeyID(rawValue: id) else { return }
-            switch hotkeyID {
-            case .translate:
-                onTranslate?()
-            case .correctAndTranslate:
-                onCorrectAndTranslate?()
-            case .capture:
-                onCapture?()
+            if let hotkeyID = HotkeyID(rawValue: id) {
+                switch hotkeyID {
+                case .translate:
+                    onTranslate?()
+                case .correctAndTranslate:
+                    onCorrectAndTranslate?()
+                case .capture:
+                    onCapture?()
+                case .launcher:
+                    onLauncher?()
+                }
+            } else {
+                onLaunchItem?(id)
             }
         }
     }

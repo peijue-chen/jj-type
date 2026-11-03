@@ -11,6 +11,7 @@
 //
 
 import AppKit
+import UniformTypeIdentifiers
 
 final class SettingsWindowController: NSWindowController {
     private var store: SettingsStore!
@@ -32,7 +33,7 @@ final class SettingsWindowController: NSWindowController {
     // One page per feature group. Adding a feature area = add a title here and a
     // matching `make…Page()` in `buildLayout`; nothing else has to change.
 
-    private let sectionControl = NSSegmentedControl(labels: ["AI 服务", "快捷键", "截图"],
+    private let sectionControl = NSSegmentedControl(labels: ["AI 服务", "快捷键", "快捷启动", "截图"],
                                                     trackingMode: .selectOne,
                                                     target: nil,
                                                     action: nil)
@@ -52,8 +53,22 @@ final class SettingsWindowController: NSWindowController {
     private var translateRecorder: HotkeyRecorderView?
     private var correctRecorder: HotkeyRecorderView?
     private var captureRecorder: HotkeyRecorderView?
+    private var launcherRecorder: HotkeyRecorderView?
     private let captureDirectoryLabel = NSTextField(labelWithString: "")
     private let captureFormatPopup = NSPopUpButton()
+
+    // Launch items page (Alfred-style: one shortcut → one app/folder/file/URL).
+    private let launchTable = NSTableView()
+    private let launchNameField = NSTextField()
+    private let launchKindPopup = NSPopUpButton()
+    private let launchTargetField = NSTextField()
+    private let launchChooseButton = NSButton(title: "选择…", target: nil, action: nil)
+    private let launchSaveButton = NSButton(title: "保存更改", target: nil, action: nil)
+    private var launchRecorder: HotkeyRecorderView?
+    private var editingLaunchId: UUID?
+    /// The launch-page hint quotes the current launcher shortcut, so it has to be
+    /// rewritten when that binding changes.
+    private var launchHintLabel: NSTextField?
 
     convenience init(store: SettingsStore) {
         // No fixed final frame — the content view is fully constraint-driven and
@@ -73,6 +88,8 @@ final class SettingsWindowController: NSWindowController {
         buildLayout(in: content)
         reloadTable()
         reloadForm()
+        reloadLaunchTable()
+        reloadLaunchForm()
         // Constraints were added AFTER the contentViewController assignment, so the
         // window kept the content view's initial frame — snap it to the real fitting
         // size of the visible tab now that layout is fully defined.
@@ -118,7 +135,7 @@ final class SettingsWindowController: NSWindowController {
             versionLabel.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -10),
         ])
 
-        pages = [makeProvidersPage(), makeHotkeyPage(), makeCapturePage()]
+        pages = [makeProvidersPage(), makeHotkeyPage(), makeLaunchPage(), makeCapturePage()]
         if let first = pages.first {
             show(page: first)
         }
@@ -207,20 +224,94 @@ final class SettingsWindowController: NSWindowController {
         let translate = HotkeyRecorderView(label: "翻译", hotkey: store.translateHotkey)
         let correct = HotkeyRecorderView(label: "纠正 + 翻译", hotkey: store.correctHotkey)
         let capture = HotkeyRecorderView(label: "截图", hotkey: store.captureHotkey)
+        let launcher = HotkeyRecorderView(label: "启动器", hotkey: store.launcherHotkey)
         translate.onHotkeyChanged = { [weak self] hotkey in self?.applyHotkey(.translate, hotkey) }
         correct.onHotkeyChanged = { [weak self] hotkey in self?.applyHotkey(.correctAndTranslate, hotkey) }
         capture.onHotkeyChanged = { [weak self] hotkey in self?.applyHotkey(.capture, hotkey) }
+        launcher.onHotkeyChanged = { [weak self] hotkey in self?.applyHotkey(.launcher, hotkey) }
         translateRecorder = translate
         correctRecorder = correct
         captureRecorder = capture
+        launcherRecorder = launcher
 
         return makePage([
-            translate, correct, capture,
+            translate, correct, capture, launcher,
             makeHint("点击输入框后直接按下新组合键；需包含 ⌘/⌥/⌃ 至少一个修饰键。"),
         ])
     }
 
-    /// Page 3: screenshot output (folder / format).
+    /// Page 3: launch items — one global shortcut per app / folder / file / URL.
+    private func makeLaunchPage() -> NSStackView {
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("launch"))
+        column.title = "项目"
+        launchTable.addTableColumn(column)
+        launchTable.headerView = nil
+        launchTable.delegate = self
+        launchTable.dataSource = self
+        launchTable.selectionHighlightStyle = .regular
+        launchTable.backgroundColor = .clear
+        let scroll = NSScrollView()
+        scroll.documentView = launchTable
+        scroll.hasVerticalScroller = true
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            scroll.heightAnchor.constraint(equalToConstant: 120),
+            scroll.widthAnchor.constraint(equalToConstant: Self.pageWidth),
+        ])
+
+        let addButton = NSButton(title: "新建", target: self, action: #selector(addLaunchItem))
+        let deleteButton = NSButton(title: "删除", target: self, action: #selector(deleteLaunchItem))
+        addButton.bezelStyle = .rounded
+        deleteButton.bezelStyle = .rounded
+        let listRow = NSStackView(views: [addButton, deleteButton])
+        listRow.spacing = 8
+
+        launchKindPopup.addItems(withTitles: LaunchTargetKind.allCases.map(\.displayName))
+        launchKindPopup.target = self
+        launchKindPopup.action = #selector(launchKindChanged)
+
+        launchTargetField.widthAnchor.constraint(equalToConstant: 286).isActive = true
+        launchChooseButton.bezelStyle = .rounded
+        launchChooseButton.target = self
+        launchChooseButton.action = #selector(chooseLaunchTarget)
+        let targetRow = NSStackView(views: [launchTargetField, launchChooseButton])
+        targetRow.spacing = 8
+
+        let recorder = HotkeyRecorderView(label: "快捷键", hotkey: nil, allowsClearing: true)
+        recorder.onHotkeyChanged = { [weak self] hotkey in self?.applyLaunchHotkey(hotkey) }
+        recorder.onHotkeyCleared = { [weak self] in self?.applyLaunchHotkey(nil) }
+        launchRecorder = recorder
+
+        launchSaveButton.bezelStyle = .rounded
+        launchSaveButton.target = self
+        launchSaveButton.action = #selector(saveLaunchItem)
+        launchSaveButton.isEnabled = false
+
+        let grid = NSGridView(views: [
+            [formLabel("名称"), launchNameField],
+            [formLabel("类型"), launchKindPopup],
+            [formLabel("目标"), targetRow],
+            [formLabel("快捷键"), recorder],
+        ])
+        grid.column(at: 0).xPlacement = .trailing
+        grid.rowSpacing = 8
+        grid.translatesAutoresizingMaskIntoConstraints = false
+
+        let hint = makeHint(Self.launchHintText(launcherHotkey: store.launcherHotkey))
+        launchHintLabel = hint
+
+        return makePage([
+            hint, scroll, listRow, grid, launchSaveButton,
+            makeHint("App 按 Bundle ID 记录，移动位置后仍可用；文件夹 / 文件按绝对路径记录。快捷键留空即只用菜单打开。"),
+        ])
+    }
+
+    private static func launchHintText(launcherHotkey: Hotkey) -> String {
+        "给任意 App、文件夹、文件或网址绑定一个全局快捷键；也可以按 "
+            + "\(launcherHotkey.displayText) 打开启动器，输入名字筛选后回车。"
+    }
+
+    /// Page 4: screenshot output (folder / format).
     private func makeCapturePage() -> NSStackView {
         makePage([
             buildCaptureGrid(),
@@ -345,6 +436,79 @@ final class SettingsWindowController: NSWindowController {
         activeButton.state = provider.id == store.activeProviderId ? .on : .off
     }
 
+    // MARK: - Launch item binding
+
+    /// Reloading clears the table selection; restore it from the edited item so
+    /// the form and the highlighted row never drift apart.
+    private func reloadLaunchTable() {
+        launchTable.reloadData()
+        guard let id = editingLaunchId,
+              let row = store.launchItems.firstIndex(where: { $0.id == id }) else { return }
+        launchTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        // A freshly appended item must be visible, not merely selected.
+        launchTable.scrollRowToVisible(row)
+    }
+
+    /// The row the user has selected right now (read live: after `reloadData`
+    /// AppKit posts a DELAYED empty-selection notification).
+    private var selectedLaunchItem: LaunchItem? {
+        let row = launchTable.selectedRow
+        guard row >= 0, row < store.launchItems.count else { return nil }
+        return store.launchItems[row]
+    }
+
+    /// The item the form is bound to. The cached id WINS and is never dropped by
+    /// a selection refresh: `reloadData()` fires a delayed "selection is empty"
+    /// notification that used to clear it, so freshly added items could not get
+    /// a shortcut ("请先在列表中选择一个项目").
+    private var editingLaunchItem: LaunchItem? {
+        if let id = editingLaunchId, let item = store.launchItems.first(where: { $0.id == id }) {
+            return item
+        }
+        return selectedLaunchItem
+    }
+
+    /// Mirrors the edited item into the form; nothing to edit clears every field
+    /// so a stale id can never be saved onto another item.
+    private func reloadLaunchForm() {
+        guard let item = editingLaunchItem else {
+            editingLaunchId = nil
+            launchNameField.stringValue = ""
+            launchKindPopup.selectItem(at: 0)
+            launchTargetField.stringValue = ""
+            launchRecorder?.setHotkey(nil)
+            launchSaveButton.isEnabled = false
+            updateLaunchTargetUI()
+            return
+        }
+        editingLaunchId = item.id
+        launchNameField.stringValue = item.name
+        launchKindPopup.selectItem(at: LaunchTargetKind.allCases.firstIndex(of: item.kind) ?? 0)
+        launchTargetField.stringValue = item.target
+        launchRecorder?.setHotkey(item.hotkey)
+        launchSaveButton.isEnabled = true
+        updateLaunchTargetUI()
+    }
+
+    private var selectedLaunchKind: LaunchTargetKind {
+        let index = launchKindPopup.indexOfSelectedItem
+        guard index >= 0, index < LaunchTargetKind.allCases.count else { return .application }
+        return LaunchTargetKind.allCases[index]
+    }
+
+    private func updateLaunchTargetUI() {
+        let kind = selectedLaunchKind
+        launchChooseButton.isEnabled = kind != .url
+        switch kind {
+        case .url:
+            launchTargetField.placeholderString = "https://example.com"
+        case .application:
+            launchTargetField.placeholderString = "Bundle ID 或 .app 路径"
+        case .folder, .file:
+            launchTargetField.placeholderString = "绝对路径"
+        }
+    }
+
     // MARK: - Actions
 
     @objc private func addProvider() {
@@ -365,7 +529,17 @@ final class SettingsWindowController: NSWindowController {
     }
 
     @objc private func deleteProvider() {
-        guard let id = editingProviderId else { return }
+        guard let id = editingProviderId,
+              let provider = store.providers.first(where: { $0.id == id }) else { return }
+        // Deleting also drops the API key from the Keychain — unrecoverable, so
+        // it must never happen on a single stray click.
+        let alert = NSAlert()
+        alert.messageText = "删除「\(provider.name)」？"
+        alert.informativeText = "该服务保存在钥匙串里的 API Key 会被一起删除，无法恢复。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "删除")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
         store.deleteProvider(id: id)
         reloadTable()
         if !store.providers.isEmpty {
@@ -474,29 +648,42 @@ final class SettingsWindowController: NSWindowController {
     /// → AppDelegate.reregisterHotkeys() performs REAL conflict detection and alerts.
     /// W2 fix: reject a binding already used by any other action.
     private func applyHotkey(_ id: HotkeyManager.HotkeyID, _ hotkey: Hotkey) {
-        let others: [Hotkey]
-        switch id {
-        case .translate:
-            others = [store.correctHotkey, store.captureHotkey]
-        case .correctAndTranslate:
-            others = [store.translateHotkey, store.captureHotkey]
-        case .capture:
-            others = [store.translateHotkey, store.correctHotkey]
-        }
         guard let recorder = recorder(for: id) else { return }
-        if others.contains(hotkey) {
+        // Every other built-in action counts as a conflict; launch items are
+        // checked separately on their own page.
+        let others = HotkeyManager.HotkeyID.allCases.filter { $0 != id }
+        if others.contains(where: { actionHotkey($0) == hotkey }) {
             recorder.reject("与其它功能快捷键重复，请换一个组合键")
             return
         }
-        switch id {
-        case .translate:
-            store.translateHotkey = hotkey
-        case .correctAndTranslate:
-            store.correctHotkey = hotkey
-        case .capture:
-            store.captureHotkey = hotkey
+        // Launch items are just as real a binding: a duplicate would pass this
+        // check, then fail at Carbon registration time and leave one action dead.
+        if let item = store.launchItems.first(where: { $0.hotkey == hotkey }) {
+            recorder.reject("与快捷启动「\(item.name)」的快捷键重复，请换一个组合键")
+            return
         }
+        setActionHotkey(hotkey, for: id)
         recorder.accept()
+    }
+
+    private func actionHotkey(_ id: HotkeyManager.HotkeyID) -> Hotkey {
+        switch id {
+        case .translate: return store.translateHotkey
+        case .correctAndTranslate: return store.correctHotkey
+        case .capture: return store.captureHotkey
+        case .launcher: return store.launcherHotkey
+        }
+    }
+
+    private func setActionHotkey(_ hotkey: Hotkey, for id: HotkeyManager.HotkeyID) {
+        switch id {
+        case .translate: store.translateHotkey = hotkey
+        case .correctAndTranslate: store.correctHotkey = hotkey
+        case .capture: store.captureHotkey = hotkey
+        case .launcher:
+            store.launcherHotkey = hotkey
+            launchHintLabel?.stringValue = Self.launchHintText(launcherHotkey: hotkey)
+        }
     }
 
     private func recorder(for id: HotkeyManager.HotkeyID) -> HotkeyRecorderView? {
@@ -504,6 +691,7 @@ final class SettingsWindowController: NSWindowController {
         case .translate: return translateRecorder
         case .correctAndTranslate: return correctRecorder
         case .capture: return captureRecorder
+        case .launcher: return launcherRecorder
         }
     }
 
@@ -525,11 +713,173 @@ final class SettingsWindowController: NSWindowController {
         store.captureFormat = CaptureFormat.allCases[index]
     }
 
+    // MARK: - Launch item actions
+
+    @objc private func addLaunchItem() {
+        let item = LaunchItem(id: UUID(), name: "新项目", kind: .application, target: "",
+                              hotkeySlot: store.nextLaunchHotkeySlot, hotkey: nil)
+        store.addLaunchItem(item)
+        // Bind the form BEFORE the reload: `reloadData()` clears the selection
+        // and only restores it from this id.
+        editingLaunchId = item.id
+        reloadLaunchTable()
+        reloadLaunchForm()
+        window?.makeFirstResponder(launchNameField)
+    }
+
+    @objc private func deleteLaunchItem() {
+        guard let item = editingLaunchItem else { return }
+        store.deleteLaunchItem(id: item.id)
+        editingLaunchId = nil
+        reloadLaunchTable()
+        if !store.launchItems.isEmpty {
+            launchTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        }
+        reloadLaunchForm()
+    }
+
+    /// Name / kind / target are saved here; the shortcut is applied immediately
+    /// by the recorder (it has to be live to be validated).
+    @objc private func saveLaunchItem() {
+        guard var item = editingLaunchItem else { return }
+        let name = launchNameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let target = launchTargetField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else {
+            showAlert("无法保存", "请填写名称")
+            return
+        }
+        guard !target.isEmpty else {
+            showAlert("无法保存", "请填写或选择一个打开目标")
+            return
+        }
+        item.name = name
+        item.kind = selectedLaunchKind
+        item.target = target
+        // A target that resolves to nothing would only ever produce an error
+        // alert from the shortcut, so ask before storing it.
+        guard item.resolvedURL != nil || confirmUnresolvableTarget(target) else { return }
+        editingLaunchId = item.id
+        store.updateLaunchItem(item)
+        reloadLaunchTable()
+        if let index = store.launchItems.firstIndex(where: { $0.id == item.id }) {
+            launchTable.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+        }
+        reloadLaunchForm()
+        launchSaveButton.title = "已保存"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            self?.launchSaveButton.title = "保存更改"
+        }
+    }
+
+    @objc private func launchKindChanged() {
+        updateLaunchTargetUI()
+    }
+
+    /// App → store the bundle id (survives moving/renaming the .app); folder /
+    /// file → absolute path. The name is auto-filled from the picker only while
+    /// it is still the placeholder, so a typed name is never overwritten.
+    @objc private func chooseLaunchTarget() {
+        let kind = selectedLaunchKind
+        guard kind != .url else { return }
+        let panel = NSOpenPanel()
+        switch kind {
+        case .application:
+            panel.canChooseFiles = true
+            panel.canChooseDirectories = false
+            panel.allowedContentTypes = [.application]
+            panel.directoryURL = URL(fileURLWithPath: "/Applications", isDirectory: true)
+        case .folder:
+            panel.canChooseFiles = false
+            panel.canChooseDirectories = true
+        case .file:
+            panel.canChooseFiles = true
+            panel.canChooseDirectories = false
+        case .url:
+            return
+        }
+        panel.canCreateDirectories = false
+        panel.prompt = "选择"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        switch kind {
+        case .application:
+            launchTargetField.stringValue = Bundle(url: url)?.bundleIdentifier ?? url.path
+        case .folder, .file:
+            launchTargetField.stringValue = url.path
+        case .url:
+            return
+        }
+        let placeholderNames = ["", "新项目", kind.displayName]
+        if placeholderNames.contains(launchNameField.stringValue) {
+            var name = FileManager.default.displayName(atPath: url.path)
+            if name.hasSuffix(".app") { name = String(name.dropLast(4)) }
+            launchNameField.stringValue = name
+        }
+    }
+
+    /// Persists the recording immediately; nil means "cleared" (allowed here,
+    /// unlike the three built-in actions).
+    private func applyLaunchHotkey(_ hotkey: Hotkey?) {
+        guard var item = editingLaunchItem else {
+            launchRecorder?.reject("请先点「新建」或在上方列表中选中一个项目")
+            return
+        }
+        if let hotkey, let conflict = conflictingActionName(for: hotkey, excluding: item.id) {
+            launchRecorder?.reject("与「\(conflict)」的快捷键重复，请换一个组合键")
+            return
+        }
+        // Pick up the name / kind / target the user already typed: recording a
+        // shortcut must not persist a half-empty item that can never open.
+        let typedName = launchNameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let typedTarget = launchTargetField.stringValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !typedName.isEmpty { item.name = typedName }
+        if !typedTarget.isEmpty { item.target = typedTarget }
+        item.kind = selectedLaunchKind
+        item.hotkey = hotkey
+        editingLaunchId = item.id
+        store.updateLaunchItem(item)
+        launchRecorder?.accept()
+        // Refresh just this row. A full `reloadData()` would clear the selection
+        // and re-run the form binding, which throws away a name the user typed
+        // but has not saved yet.
+        reloadLaunchRow(id: item.id)
+    }
+
+    /// Rewrites one row's text in place (shortcut column) without touching the
+    /// table's selection or the form.
+    private func reloadLaunchRow(id: UUID) {
+        guard let row = store.launchItems.firstIndex(where: { $0.id == id }),
+              row < launchTable.numberOfRows else { return }
+        launchTable.reloadData(forRowIndexes: IndexSet(integer: row),
+                               columnIndexes: IndexSet(integer: 0))
+    }
+
+    private func conflictingActionName(for hotkey: Hotkey, excluding id: UUID) -> String? {
+        if store.translateHotkey == hotkey { return "翻译" }
+        if store.correctHotkey == hotkey { return "纠正 + 翻译" }
+        if store.captureHotkey == hotkey { return "截图" }
+        if store.launcherHotkey == hotkey { return "启动器" }
+        return store.launchItems.first { $0.id != id && $0.hotkey == hotkey }?.name
+    }
+
     private func showAlert(_ title: String, _ message: String) {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message
         alert.runModal()
+    }
+
+    /// True when the user wants to keep a target that cannot be resolved right
+    /// now (moved file, unmounted volume, typo).
+    private func confirmUnresolvableTarget(_ target: String) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "目标暂时不可用"
+        alert.informativeText = "现在找不到「\(target)」，可能已被移动、删除，" +
+            "或所在磁盘未挂载。仍要保存吗？"
+        alert.addButton(withTitle: "仍然保存")
+        alert.addButton(withTitle: "取消")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 }
 
@@ -537,26 +887,46 @@ final class SettingsWindowController: NSWindowController {
 
 extension SettingsWindowController: NSTableViewDataSource, NSTableViewDelegate {
     func numberOfRows(in tableView: NSTableView) -> Int {
-        store.providers.count
+        tableView === launchTable ? store.launchItems.count : store.providers.count
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        if tableView === launchTable {
+            let item = store.launchItems[row]
+            let shortcut = item.hotkey.map { "  \($0.displayText)" } ?? "  未设快捷键"
+            return makeCell(text: "\(item.name) — \(item.kind.displayName)\(shortcut)")
+        }
         let provider = store.providers[row]
         let isActive = provider.id == store.activeProviderId
+        return makeCell(text: isActive ? "● \(provider.name) — \(provider.model)"
+                                       : "○ \(provider.name) — \(provider.model)")
+    }
+
+    private func makeCell(text value: String) -> NSView {
         let cell = NSTableCellView()
-        let text = NSTextField(labelWithString: isActive ? "● \(provider.name) — \(provider.model)"
-                                                        : "○ \(provider.name) — \(provider.model)")
+        let text = NSTextField(labelWithString: value)
         text.font = .systemFont(ofSize: 12)
+        text.lineBreakMode = .byTruncatingTail
         cell.addSubview(text)
         text.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             text.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+            text.trailingAnchor.constraint(lessThanOrEqualTo: cell.trailingAnchor, constant: -4),
             text.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
         ])
         return cell
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
-        reloadForm()
+        guard let table = notification.object as? NSTableView else { return }
+        if table === launchTable {
+            // A real click adopts the row; an EMPTY selection is the delayed
+            // post-`reloadData` artifact and must keep the current binding, or
+            // the form would lose its item right after 新建 / 保存.
+            if let item = selectedLaunchItem { editingLaunchId = item.id }
+            reloadLaunchForm()
+        } else {
+            reloadForm()
+        }
     }
 }

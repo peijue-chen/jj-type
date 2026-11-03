@@ -11,9 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     override init() {
         let store = SettingsStore()
         settingsStore = store
-        hotkeyManager = HotkeyManager(translate: store.translateHotkey,
-                                      correct: store.correctHotkey,
-                                      capture: store.captureHotkey)
+        hotkeyManager = HotkeyManager()
         super.init()
     }
 
@@ -27,6 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var resultPanel: ResultPanelController?
     private var translationWindow: TranslationWindowController?
+    private var launcherWindow: LauncherWindowController?
     private var settingsWindow: SettingsWindowController?
     private var inFlightTask: Task<Void, Never>?
 
@@ -46,6 +45,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.reregisterHotkeys()
             }
         }
+        // Launch items carry their own hotkey AND feed the status menu, so one
+        // callback drives both.
+        settingsStore.onLaunchItemsChanged = { [weak self] in
+            MainActor.assumeIsolated {
+                self?.reregisterHotkeys()
+            }
+        }
 
         hotkeyManager.onTranslate = { [weak self] in
             MainActor.assumeIsolated { self?.runTranslationWindowFlow() }
@@ -55,6 +61,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         hotkeyManager.onCapture = { [weak self] in
             MainActor.assumeIsolated { self?.runCaptureFlow() }
+        }
+        hotkeyManager.onLauncher = { [weak self] in
+            MainActor.assumeIsolated { self?.toggleLauncher() }
+        }
+        hotkeyManager.onLaunchItem = { [weak self] slot in
+            MainActor.assumeIsolated { self?.openLaunchItem(slot: slot) }
         }
 
         captureOverlay.onFinish = { [weak self] image, copied in
@@ -150,8 +162,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         menu.addItem(.separator())
+        menu.addItem(withTitle: "启动器  \(settingsStore.launcherHotkey.displayText)",
+                     action: #selector(openLauncherMenu), keyEquivalent: "").target = self
         menu.addItem(withTitle: "截图  \(settingsStore.captureHotkey.displayText)",
                      action: #selector(startCapture), keyEquivalent: "").target = self
+
+        if !settingsStore.launchItems.isEmpty {
+            let parent = NSMenuItem(title: "快捷启动", action: nil, keyEquivalent: "")
+            let submenu = NSMenu()
+            for item in settingsStore.launchItems {
+                let title = item.hotkey.map { "\(item.name)  \($0.displayText)" } ?? item.name
+                let entry = NSMenuItem(title: title, action: #selector(openLaunchItemMenu(_:)),
+                                       keyEquivalent: "")
+                entry.target = self
+                entry.representedObject = item.id
+                if let icon = item.icon {
+                    icon.size = NSSize(width: 16, height: 16)
+                    entry.image = icon
+                }
+                submenu.addItem(entry)
+            }
+            parent.submenu = submenu
+            menu.addItem(parent)
+        }
+
         menu.addItem(.separator())
         menu.addItem(withTitle: "设置…", action: #selector(openSettings), keyEquivalent: ",").target = self
         menu.addItem(withTitle: "辅助功能权限引导", action: #selector(openAccessibilityGuide),
@@ -397,35 +431,184 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // MARK: - Launch items
+
+    /// Launcher hotkey: toggles, so pressing it twice is a no-op instead of
+    /// stacking a second panel on top of the first.
+    private func toggleLauncher() {
+        let window = launcherWindowIfNeeded()
+        if window.isVisible {
+            window.dismiss()
+        } else {
+            window.present(items: settingsStore.launchItems)
+        }
+    }
+
+    private func launcherWindowIfNeeded() -> LauncherWindowController {
+        if let launcherWindow { return launcherWindow }
+        let controller = LauncherWindowController()
+        controller.onOpenItem = { [weak self] item in self?.perform(item) }
+        controller.onOpenApp = { [weak self] url in self?.openApplication(at: url) }
+        controller.onOpenDirect = { [weak self] raw in self?.openDirect(raw) }
+        controller.onOpenSystem = { [weak self] command in self?.performSystemCommand(command) }
+        launcherWindow = controller
+        return controller
+    }
+
+    @objc private func openLauncherMenu() {
+        launcherWindowIfNeeded().present(items: settingsStore.launchItems)
+    }
+
+    /// App found by the launcher's index (not configured as a launch item).
+    private func openApplication(at url: URL) {
+        guard NSWorkspace.shared.open(url) else {
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = "无法打开「\(url.deletingPathExtension().lastPathComponent)」"
+            alert.informativeText = "系统拒绝了这次操作，可能应用已被移除。"
+            alert.runModal()
+            return
+        }
+    }
+
+    /// Alfred's "just open what I typed": an absolute / `~` path or a URL.
+    /// Anything else that still looks like a domain gets https:// prefixed.
+    private func openDirect(_ raw: String) {
+        let expanded = (raw as NSString).expandingTildeInPath
+        let url: URL?
+        if expanded.hasPrefix("/") {
+            url = FileManager.default.fileExists(atPath: expanded)
+                ? URL(fileURLWithPath: expanded) : nil
+        } else if let parsed = URL(string: raw), parsed.scheme != nil {
+            url = parsed
+        } else if expanded.contains(".") {
+            url = URL(string: "https://\(expanded)")
+        } else {
+            url = nil
+        }
+        guard let url, NSWorkspace.shared.open(url) else {
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = "无法打开「\(raw)」"
+            alert.informativeText = "既不是存在的文件路径，也不是有效的网址。"
+            alert.runModal()
+            return
+        }
+    }
+
+    /// Alfred-style system rows from the launcher. Destructive commands confirm
+    /// first; failures always surface as an alert (feedback rule).
+    private func performSystemCommand(_ command: SystemCommand) {
+        if command.requiresConfirmation {
+            // The launcher never activates the app, so without this the modal
+            // would come up behind the user's frontmost window and ⏎ would not
+            // reach it.
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = "确定要「\(command.title)」吗？"
+            alert.informativeText = command.confirmationHint
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: command.title)
+            alert.addButton(withTitle: "取消")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        do {
+            try command.perform()
+            // Empty trash is the only one whose success is not self-evident
+            // (lock/sleep/restart take over the screen); confirm it with a toast.
+            if command == .emptyTrash {
+                CaptureToast.shared.show("已清空废纸篓", symbol: "trash")
+            }
+        } catch {
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = "无法执行「\(command.title)」"
+            if let systemError = error as? SystemCommandError, systemError.isAuthorizationFailure {
+                alert.informativeText = "请到 系统设置 → 隐私与安全性 → 自动化，" +
+                    "勾选允许 JJType 控制 \(systemError.reason)，然后重试。"
+                alert.addButton(withTitle: "打开设置")
+                alert.addButton(withTitle: "取消")
+                if alert.runModal() == .alertFirstButtonReturn,
+                   let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation") {
+                    NSWorkspace.shared.open(url)
+                }
+            } else {
+                alert.informativeText = (error as? LocalizedError)?.errorDescription
+                    ?? error.localizedDescription
+                alert.runModal()
+            }
+        }
+    }
+
+    /// Hotkey path: the slot is the identity, the item is looked up fresh so
+    /// edits take effect without re-registering anything.
+    private func openLaunchItem(slot: UInt32) {
+        guard let item = settingsStore.launchItems.first(where: { $0.hotkeySlot == slot }) else {
+            return
+        }
+        perform(item)
+    }
+
+    @objc private func openLaunchItemMenu(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID,
+              let item = settingsStore.launchItems.first(where: { $0.id == id }) else { return }
+        perform(item)
+    }
+
+    /// Feedback rule: a launcher that does nothing is a bug, so a failure always
+    /// surfaces (the success path is the app/window that appears).
+    private func perform(_ item: LaunchItem) {
+        do {
+            try item.open()
+        } catch {
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = "无法打开「\(item.name)」"
+            alert.informativeText = (error as? LocalizedError)?.errorDescription
+                ?? error.localizedDescription
+            alert.runModal()
+        }
+    }
+
     // MARK: - Hotkey changes
 
-    /// Re-registers all hotkeys with REAL conflict detection via reregister()'s result.
-    /// Triggered at launch (W1) and whenever SettingsStore persists a new binding (C1).
+    /// Re-registers the built-in actions plus every launch item, with REAL
+    /// conflict detection via reregister()'s result. Triggered at launch (W1)
+    /// and whenever SettingsStore persists a binding (C1).
     private func reregisterHotkeys() {
-        if let failed = hotkeyManager.reregister(translate: settingsStore.translateHotkey,
-                                                 correct: settingsStore.correctHotkey,
-                                                 capture: settingsStore.captureHotkey) {
-            let name: String
-            let hotkey: Hotkey
-            switch failed {
-            case .translate:
-                name = "翻译"
-                hotkey = settingsStore.translateHotkey
-            case .correctAndTranslate:
-                name = "纠正+翻译"
-                hotkey = settingsStore.correctHotkey
-            case .capture:
-                name = "截图"
-                hotkey = settingsStore.captureHotkey
+        var bindings: [UInt32: Hotkey] = [
+            HotkeyManager.HotkeyID.translate.rawValue: settingsStore.translateHotkey,
+            HotkeyManager.HotkeyID.correctAndTranslate.rawValue: settingsStore.correctHotkey,
+            HotkeyManager.HotkeyID.capture.rawValue: settingsStore.captureHotkey,
+            HotkeyManager.HotkeyID.launcher.rawValue: settingsStore.launcherHotkey,
+        ]
+        var names: [UInt32: String] = [
+            HotkeyManager.HotkeyID.translate.rawValue: "翻译",
+            HotkeyManager.HotkeyID.correctAndTranslate.rawValue: "纠正+翻译",
+            HotkeyManager.HotkeyID.capture.rawValue: "截图",
+            HotkeyManager.HotkeyID.launcher.rawValue: "启动器",
+        ]
+        for item in settingsStore.launchItems {
+            guard let hotkey = item.hotkey else { continue }
+            bindings[item.hotkeySlot] = hotkey
+            names[item.hotkeySlot] = item.name
+        }
+
+        // Registration is per-binding: one taken combination no longer kills the
+        // others, it is just named in the alert and left unbound.
+        let failed = hotkeyManager.reregister(bindings)
+        if !failed.isEmpty {
+            let details = failed.compactMap { id -> String? in
+                guard let name = names[id], let hotkey = bindings[id] else { return nil }
+                return "「\(name)」\(hotkey.displayText)"
             }
             let alert = NSAlert()
             alert.messageText = "快捷键注册失败"
-            // reregister is all-or-nothing: a failing binding unregisters ALL hotkeys.
-            alert.informativeText = "「\(name)」的 \(hotkey.displayText) 可能与其他应用冲突，请换一个组合键。" +
-                "（三个快捷键目前已全部注销，更换后即恢复）"
+            alert.informativeText = "\(details.joined(separator: "、")) 已被其它应用占用，" +
+                "请换一个组合键。其余快捷键不受影响。"
             alert.runModal()
         }
-        // The status menu shows the current capture binding.
+        // The status menu shows the current capture binding and launch items.
         rebuildStatusMenu()
     }
 }

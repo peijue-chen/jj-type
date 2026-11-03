@@ -16,7 +16,9 @@ grammar correction via user-configured OpenAI-compatible endpoints.
 | File | Responsibility |
 |------|----------------|
 | `jj-type/AppDelegate.swift` | Status item menu, hotkey wiring, capture → AI → panel pipeline |
-| `jj-type/HotkeyManager.swift` | Carbon RegisterEventHotKey; `Hotkey` Codable (UserDefaults); conflict reporting |
+| `jj-type/HotkeyManager.swift` | Carbon RegisterEventHotKey; `Hotkey` Codable (UserDefaults); built-in ids 1–3 + launch-item slots 100–999; per-binding conflict reporting |
+| `jj-type/LaunchItem.swift` | `LaunchItem` model for the Alfred-style launcher (app / folder / file / URL), target resolution (bundle id first) and `NSWorkspace.open` |
+| `jj-type/SystemCommand.swift` | Alfred-style system rows (锁屏/睡眠/重启/关机/注销/清空废纸篓) with Latin aliases; lock = synthetic ⌃⌘Q CGEvent, sleep = `pmset sleepnow`, restart/shutdown/logout/empty trash = NSAppleScript (System Events / Finder — needs the Automation TCC grant; a -1743 surfaces a Chinese guide naming the target + deep link to the Automation pane); destructive ones confirm first; only matched on a NON-empty query |
 | `jj-type/TextCaptureService.swift` | Pasteboard changeCount snapshot → synthetic ⌘C → bounded poll → selected text |
 | `jj-type/LanguageRouter.swift` | 4-way detection (english/chinese/mixed/other; CJK+Latin scan + NLLanguageRecognizer) + `TranslateMode` |
 | `jj-type/AIClient.swift` | OpenAI-compatible `{baseURL}/chat/completions`, 30 s, non-streaming, Codable models |
@@ -25,9 +27,11 @@ grammar correction via user-configured OpenAI-compatible endpoints.
 | `jj-type/SettingsStore.swift` | Providers/active/hotkeys in UserDefaults (`jjtype.*` keys) |
 | `jj-type/ResultPanelController.swift` | Reused non-activating floating panel: loading/error/result, replace/copy |
 | `jj-type/TranslationWindowController.swift` | ⌥+D input-window mode (Bob/Easydict-style): prefill-or-type, Enter/Esc equivalents, auto-copy |
+| `jj-type/LauncherWindowController.swift` | ⌥+O Alfred-style launcher: borderless **non-activating** panel (`canBecomeKey` override, `orderFrontRegardless` — `orderFront` is a no-op while the app is inactive), **debounced** live filter (60 ms coalescing, pre-lower-cased keys + word initials, top-60 results, reused `LauncherCell`s, cached icons) over launch items **and installed apps**, search badge at the right of the input, ↑↓/⏎/esc via the field editor's command selectors, direct path/URL row and a Google-search fallback row (opens in the DEFAULT browser); the panel resize is coalesced separately (250 ms) because resizing a `.behindWindow` HUD re-blurs the desktop; the index is re-read on every open but only rebuilt when the canonical app paths changed, and configured items are deduped against the index by **resolved** path |
+| `jj-type/AppIndex.swift` | `nonisolated` scan of `/Applications`, `/System/Applications` (+ Utilities), `/System/Cryptexes/App/System/Applications` and `~/Applications`, one nesting level deep, deduped by resolved path (also exposed as `DiscoveredApp.canonicalPath`), cached with a 5-minute TTL so a newly installed app shows up without a relaunch; uses the **string** listing API (the URL one silently drops symlinks — Safari is a symlink into the cryptex); never runs on the main actor |
 | `jj-type/main.swift` | Explicit entry point — the `@main` AppKit bootstrap is broken on this macOS 26 beta toolchain; do not switch back |
-| `jj-type/SettingsWindowController.swift` | Tabbed settings (`AI 服务` / `快捷键` / `截图`): segmented header + one stack page per tab, window re-fits on tab switch; provider CRUD + connection test + hotkey customization + capture folder/format; shared footer shows the bundle version |
-| `jj-type/HotkeyRecorderView.swift` | Keyboard capture field for hotkey rebinding |
+| `jj-type/SettingsWindowController.swift` | Tabbed settings (`AI 服务` / `快捷键` / `快捷启动` / `截图`): segmented header + one stack page per tab, window re-fits on tab switch; provider CRUD + connection test + hotkey customization + launch-item CRUD + capture folder/format; the launch form is bound by **item id** (`editingLaunchId`) and that binding must never be dropped by a table selection notification; built-in hotkey conflicts are also checked against launch items; deleting a provider asks first (the Keychain key goes with it); shared footer shows the bundle version |
+| `jj-type/HotkeyRecorderView.swift` | Keyboard capture field for hotkey rebinding; stores ONLY ⌘/⌥/⌃/⇧ (CapsLock / Fn / numericPad would make two identical combos compare unequal and defeat conflict detection) |
 | `jj-type/AccessibilityPermission.swift` | AXIsProcessTrusted + first-run guidance window |
 | `jj-type/ScreenCapturePermission.swift` | Screen Recording TCC (CGPreflight/CGRequest), settings pane, relaunch helper + guidance window |
 | `jj-type/ScreenCaptureService.swift` | `nonisolated`: freezes every display via `SCScreenshotManager` (macOS 14+), crops/composites the selection |

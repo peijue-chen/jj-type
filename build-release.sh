@@ -76,3 +76,6 @@ mkdir -p "apps/${STAMP}"
 rm -rf "apps/${STAMP}/JJType.app"
 cp -R "$SRC" "apps/${STAMP}/JJType.app"
 echo "Built: apps/${STAMP}/JJType.app ($((SECONDS - START))s)"
+
+# open
+open "./apps/${STAMP}/"
