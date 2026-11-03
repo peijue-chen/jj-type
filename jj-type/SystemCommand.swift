@@ -90,20 +90,57 @@ enum SystemCommand: CaseIterable {
                                                 target: "System Events")
         case .logout: try Self.runAppleScript("tell application \"System Events\" to log out",
                                               target: "System Events")
-        case .emptyTrash: try Self.runAppleScript("tell application \"Finder\" to empty trash",
-                                                 target: "Finder")
-    }
+        case .emptyTrash:
+            do {
+                try Self.runAppleScript("tell application \"Finder\" to empty trash",
+                                        target: "Finder")
+            } catch let error as SystemCommandError where error.isAuthorizationFailure {
+                // ~/.Trash is TCC-protected: without Full Disk Access a process
+                // cannot even LIST it, so direct deletion is not an option. The
+                // permission-free fallback is the Finder shortcut — needs only
+                // the Accessibility grant the app already requires.
+                try Self.emptyTrashViaFinderShortcut()
+            }
+        }
     }
 
     // MARK: - Private
 
+    /// Permission-free trash emptying: ⇧⌥⌘⌫ is Finder's "Empty Trash Without
+    /// Warning" MENU shortcut, so Finder must be frontmost when the synthetic
+    /// event lands — post too early and the keys go to the previous app. The
+    /// main run loop is pumped (never blocked) while waiting. The user ends up
+    /// in Finder afterwards; that is the price of needing no extra permission.
+    private static func emptyTrashViaFinderShortcut() throws {
+        guard let finder = NSRunningApplication.runningApplications(
+            withBundleIdentifier: "com.apple.finder").first else {
+            throw SystemCommandError(reason: "找不到 Finder")
+        }
+        finder.activate()
+        let deadline = Date().addingTimeInterval(1.0)
+        while Date() < deadline,
+              NSWorkspace.shared.frontmostApplication?.bundleIdentifier != "com.apple.finder" {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.finder" else {
+            throw SystemCommandError(reason: "无法把 Finder 切到前台，请重试")
+        }
+        // One extra beat for the activation to settle before posting.
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        postKey(virtualKey: 51, [.maskShift, .maskAlternate, .maskCommand]) // kVK_Delete
+    }
+
     /// Locks via the system default ⌃⌘Q shortcut. Posting the synthetic event
     /// needs Accessibility, which the app already requires for its core flows.
     private static func lockScreen() {
+        postKey(virtualKey: 12, [.maskCommand, .maskControl]) // kVK_ANSI_Q
+    }
+
+    /// Synthesizes one modified key press at the session tap (Accessibility only).
+    private static func postKey(virtualKey: CGKeyCode, _ flags: CGEventFlags) {
         let source = CGEventSource(stateID: .hidSystemState)
-        let flags: CGEventFlags = [.maskCommand, .maskControl]
-        let down = CGEvent(keyboardEventSource: source, virtualKey: 12, keyDown: true)
-        let up = CGEvent(keyboardEventSource: source, virtualKey: 12, keyDown: false)
+        let down = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: true)
+        let up = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: false)
         down?.flags = flags
         up?.flags = flags
         down?.post(tap: .cgSessionEventTap)
