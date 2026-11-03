@@ -38,6 +38,7 @@ final class SettingsStore {
         static let captureFormat = "jjtype.capture.format"
         static let accessibilityGuided = "jjtype.guided.accessibility"
         static let launchItems = "jjtype.launchItems"
+        static let preferredTerminal = "jjtype.terminal.preferred"
     }
 
     /// Fired whenever the provider list or active provider changes (menu rebuild).
@@ -205,6 +206,19 @@ final class SettingsStore {
         launchItems.removeAll { $0.id == id }
         guard launchItems.count != before else { return }
         persistLaunchItems()
+    }
+
+    // MARK: - Finder toolbar terminal
+
+    /// Preferred terminal bundle id for the Finder-toolbar "open terminal"
+    /// action; nil = auto (iTerm2 when installed, else Terminal.app). Invalid
+    /// or uninstalled values fall back at use time, so nothing is ever broken.
+    var preferredTerminalRawValue: String? {
+        get { defaults.string(forKey: Key.preferredTerminal) }
+        set {
+            guard newValue != preferredTerminalRawValue else { return }
+            defaults.set(newValue, forKey: Key.preferredTerminal)
+        }
     }
 
     // MARK: - First-run guidance flag

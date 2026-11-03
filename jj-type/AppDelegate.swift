@@ -30,6 +30,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var inFlightTask: Task<Void, Never>?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        NSLog("[JJType] didFinishLaunching frontmost=%@",
+              NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "nil")
         resultPanel = ResultPanelController()
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -90,10 +92,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             settingsStore.accessibilityGuidedShown = true
             requestAccessibilityIfNeeded()
         }
+
+        // Cold launch via a Finder toolbar click (app was not running): same
+        // detection, no desktop fallback — at login Finder is frontmost with
+        // no open windows and that must never spawn a terminal.
+        FinderTerminal.handleLaunch(coldLaunch: true)
     }
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
         true
+    }
+
+    /// Finder toolbar click on the RUNNING app: LaunchServices sends a reopen
+    /// (rapp) event; the LSUIElement app never activates, so Finder stays
+    /// frontmost and FinderTerminal can detect the toolbar context. ⌥-click
+    /// opens settings instead (go2shell parity).
+    func applicationShouldHandleReopen(_ application: NSApplication,
+                                       hasVisibleWindows flag: Bool) -> Bool {
+        NSLog("[JJType] reopen received, visible=%@ option=%@",
+              flag ? "1" : "0", NSEvent.modifierFlags.contains(.option) ? "1" : "0")
+        if NSEvent.modifierFlags.contains(.option) {
+            openSettings()
+            settingsWindow?.selectTerminalSection()
+        } else {
+            FinderTerminal.handleLaunch(coldLaunch: false)
+        }
+        return true
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -192,6 +216,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                      keyEquivalent: "").target = self
         menu.addItem(withTitle: "屏幕录制权限引导", action: #selector(openScreenCaptureGuide),
                      keyEquivalent: "").target = self
+        menu.addItem(withTitle: "自动化权限引导", action: #selector(openAutomationGuide),
+                     keyEquivalent: "").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "退出 jj-type", action: #selector(quit), keyEquivalent: "q").target = self
 
@@ -218,6 +244,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openScreenCaptureGuide() {
         ScreenCaptureGuideWindowController.shared.showIfNeeded(force: true)
+    }
+
+    @objc private func openAutomationGuide() {
+        AutomationGuideWindowController.shared.showIfNeeded(force: true)
     }
 
     @objc private func quit() {

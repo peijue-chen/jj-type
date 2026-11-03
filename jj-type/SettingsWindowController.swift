@@ -2,7 +2,7 @@
 //  SettingsWindowController.swift
 //  jj-type
 //
-//  Settings UI, split into pages (AI 服务 / 快捷键 / 截图) behind a segmented
+//  Settings UI, split into pages (AI 服务 / 快捷键 / 快捷启动 / 终端 / 截图) behind a segmented
 //  header: provider CRUD (name / base URL / API key / model) with an inline
 //  connection test, active provider selection, hotkey customization and the
 //  screenshot output folder / format. New feature areas become new pages.
@@ -33,7 +33,7 @@ final class SettingsWindowController: NSWindowController {
     // One page per feature group. Adding a feature area = add a title here and a
     // matching `make…Page()` in `buildLayout`; nothing else has to change.
 
-    private let sectionControl = NSSegmentedControl(labels: ["AI 服务", "快捷键", "快捷启动", "截图"],
+    private let sectionControl = NSSegmentedControl(labels: ["AI 服务", "快捷键", "快捷启动", "终端", "截图"],
                                                     trackingMode: .selectOne,
                                                     target: nil,
                                                     action: nil)
@@ -69,6 +69,10 @@ final class SettingsWindowController: NSWindowController {
     /// The launch-page hint quotes the current launcher shortcut, so it has to be
     /// rewritten when that binding changes.
     private var launchHintLabel: NSTextField?
+    /// Finder toolbar → terminal preference (shared page with launch items).
+    private let terminalPopup = NSPopUpButton()
+    /// Kept so the installed-state refresh can tell which page is the tab.
+    private weak var terminalPage: NSStackView?
 
     convenience init(store: SettingsStore) {
         // No fixed final frame — the content view is fully constraint-driven and
@@ -135,7 +139,8 @@ final class SettingsWindowController: NSWindowController {
             versionLabel.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -10),
         ])
 
-        pages = [makeProvidersPage(), makeHotkeyPage(), makeLaunchPage(), makeCapturePage()]
+        pages = [makeProvidersPage(), makeHotkeyPage(), makeLaunchPage(),
+                 makeTerminalPage(), makeCapturePage()]
         if let first = pages.first {
             show(page: first)
         }
@@ -306,12 +311,65 @@ final class SettingsWindowController: NSWindowController {
         ])
     }
 
+    /// Page 4: Finder toolbar → terminal (go2shell-style). Uninstalled
+    /// terminals stay visible but disabled, like go2shell's settings list.
+    private func makeTerminalPage() -> NSStackView {
+        terminalPopup.target = self
+        terminalPopup.action = #selector(terminalChanged)
+        refreshTerminalPopup()
+
+        let guideButton = NSButton(title: "自动化权限引导…", target: self, action: #selector(openAutomationGuide))
+        guideButton.bezelStyle = .rounded
+
+        let grid = NSGridView(views: [
+            [formLabel("首选终端"), terminalPopup],
+            [formLabel("权限"), guideButton],
+        ])
+        grid.column(at: 0).xPlacement = .trailing
+        grid.rowSpacing = 8
+        grid.translatesAutoresizingMaskIntoConstraints = false
+
+        let page = makePage([
+            makeHint("按住 ⌘ 把 JJType.app 拖到 Finder 窗口工具栏，点击图标即可在当前文件夹打开终端；选中文件时打开其所在文件夹，无窗口时打开桌面；按住 ⌥ 点击图标打开本页设置。"),
+            grid,
+            makeHint("未安装的终端会置灰；首选终端被卸载后自动回退到系统终端。首次使用需要在 系统设置 → 隐私与安全性 → 自动化 中允许 JJType 控制 Finder。"),
+        ])
+        terminalPage = page
+        return page
+    }
+
+    /// (Re)builds the popup items + selection; re-run whenever the page is
+    /// shown so terminals installed while the window was cached turn enabled.
+    private func refreshTerminalPopup() {
+        terminalPopup.removeAllItems()
+        for terminal in TerminalApp.allCases {
+            let item = NSMenuItem(title: terminal.displayName, action: nil, keyEquivalent: "")
+            item.representedObject = terminal.rawValue
+            if !terminal.isInstalled {
+                item.title = "\(terminal.displayName)（未安装）"
+                item.isEnabled = false
+            }
+            terminalPopup.menu?.addItem(item)
+        }
+        selectTerminal(store.preferredTerminalRawValue.flatMap(TerminalApp.init(rawValue:))
+                       ?? TerminalApp.resolved)
+    }
+
+    private func selectTerminal(_ terminal: TerminalApp) {
+        for item in terminalPopup.itemArray {
+            if item.representedObject as? String == terminal.rawValue {
+                terminalPopup.select(item)
+                return
+            }
+        }
+    }
+
     private static func launchHintText(launcherHotkey: Hotkey) -> String {
         "给任意 App、文件夹、文件或网址绑定一个全局快捷键；也可以按 "
             + "\(launcherHotkey.displayText) 打开启动器，输入名字筛选后回车。"
     }
 
-    /// Page 4: screenshot output (folder / format).
+    /// Page 5: screenshot output (folder / format).
     private func makeCapturePage() -> NSStackView {
         makePage([
             buildCaptureGrid(),
@@ -325,7 +383,22 @@ final class SettingsWindowController: NSWindowController {
         let index = sectionControl.selectedSegment
         guard index >= 0, index < pages.count else { return }
         show(page: pages[index])
+        // The window is cached for the app's lifetime, so a terminal installed
+        // since the popup was first built would stay greyed — rebuild the
+        // installed state every time the page is shown.
+        if terminalPage != nil, pages[index] === terminalPage {
+            refreshTerminalPopup()
+        }
         resizeWindowToFit()
+    }
+
+    /// ⌥-click on the Finder toolbar icon opens settings straight onto the
+    /// terminal page (go2shell parity: its ⌥-click shows the terminal picker).
+    func selectTerminalSection() {
+        guard let index = (0..<sectionControl.segmentCount)
+            .first(where: { sectionControl.label(forSegment: $0) == "终端" }) else { return }
+        sectionControl.selectedSegment = index
+        sectionChanged()
     }
 
     private func show(page: NSView) {
@@ -711,6 +784,19 @@ final class SettingsWindowController: NSWindowController {
         let index = captureFormatPopup.indexOfSelectedItem
         guard index >= 0, index < CaptureFormat.allCases.count else { return }
         store.captureFormat = CaptureFormat.allCases[index]
+    }
+
+    /// Stores the bundle id; the use-time resolver handles uninstalled targets.
+    @objc private func terminalChanged() {
+        guard let rawValue = terminalPopup.selectedItem?.representedObject as? String,
+              TerminalApp(rawValue: rawValue) != nil else { return }
+        store.preferredTerminalRawValue = rawValue
+    }
+
+    /// Finder-terminal flow needs the Automation grant for Finder; the guide
+    /// window carries verification + the system-settings deep link.
+    @objc private func openAutomationGuide() {
+        AutomationGuideWindowController.shared.showIfNeeded(force: true)
     }
 
     // MARK: - Launch item actions
