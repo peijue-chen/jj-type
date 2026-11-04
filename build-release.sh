@@ -63,7 +63,7 @@ if [ "$STATUS" -ne 0 ]; then
   echo "!! 编译失败（exit ${STATUS}）— 用 VERBOSE=1 ./build-release.sh 看完整日志" >&2
   exit "$STATUS"
 fi
-echo "==> 编译完成（$((SECONDS - START))s · $(ls jj-type/*.swift | wc -l | tr -d ' ') 个 Swift 文件 × 2 架构）"
+echo "==> 编译完成（$((SECONDS - START))s · $(find jj-type -name '*.swift' | wc -l | tr -d ' ') 个 Swift 文件 × 2 架构）"
 
 SRC="$BUILD_DIR/Build/Products/Release/jj-type.app"
 if [ ! -d "$SRC" ]; then

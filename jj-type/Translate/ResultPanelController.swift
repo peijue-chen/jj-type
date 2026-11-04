@@ -181,7 +181,7 @@ final class ResultPanelController: NSObject {
 
         for caption in [correctedCaption, translationCaption] {
             caption.font = .systemFont(ofSize: 11, weight: .semibold)
-            caption.textColor = .secondaryLabelColor
+            caption.textColor = .controlAccentColor
         }
         for label in [correctedLabel, translationLabel] {
             label.font = .systemFont(ofSize: 13)
@@ -259,6 +259,16 @@ final class ResultPanelController: NSObject {
         button.action = action
         button.bezelStyle = .rounded
         button.controlSize = .regular
+        // The replace action is the emphasis of the result state — accent fill.
+        if button === replaceButton {
+            button.bezelColor = .controlAccentColor
+            button.attributedTitle = NSAttributedString(
+                string: button.title,
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+                    .foregroundColor: NSColor.white,
+                ])
+        }
     }
 
     private func setState(_ state: PanelState) {

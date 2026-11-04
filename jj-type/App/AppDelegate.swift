@@ -206,8 +206,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Status menu
 
-    /// SF Symbol template image (adapts to light/dark menu bar) with a bulletproof
-    /// text fallback: nil symbol OR zero-size image → visible "文A" title, always.
+    /// Brand "JJ▮" template image (adapts to light/dark menu bar) with a
+    /// bulletproof text fallback: nil image OR zero-size → visible "文A" title.
     private func configureStatusIcon() {
         guard let button = statusItem?.button else { return }
         // While keep-awake is on, the icon swaps to a coffee cup — a
@@ -218,15 +218,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                              accessibilityDescription: "JJType 防休眠")
                 ?? NSImage(systemSymbolName: "cup.and.saucer",
                            accessibilityDescription: "JJType 防休眠")
+            symbol?.isTemplate = true
         } else {
-            symbol = NSImage(systemSymbolName: "translate", accessibilityDescription: "JJType")
-                ?? NSImage(systemSymbolName: "character.bubble", accessibilityDescription: "JJType")
-                ?? NSImage(systemSymbolName: "character.textbox", accessibilityDescription: "JJType")
+            symbol = Theme.menuBarImage()
         }
         if let symbol, symbol.size.width > 0, symbol.size.height > 0 {
-            symbol.isTemplate = true
-            symbol.size = NSSize(width: 18, height: 18)
             button.imageScaling = .scaleProportionallyDown
+            button.title = ""
             button.image = symbol
         } else {
             button.image = nil

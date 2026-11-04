@@ -2,7 +2,9 @@
 //  HotkeyRecorderView.swift
 //  jj-type
 //
-//  Records a global-hotkey combination from keyboard input.
+//  Records a global-hotkey combination from keyboard input. Styled as a filled
+//  field (Theme language): soft fill + hairline border, accent border + tint
+//  while recording (first responder).
 //
 
 import AppKit
@@ -23,23 +25,25 @@ final class HotkeyRecorderView: NSView {
 
     private static let defaultHint = "点击后按下新快捷键"
 
-    init(label text: String, hotkey: Hotkey?, allowsClearing: Bool = false) {
+    init(label text: String, hotkey: Hotkey?, allowsClearing: Bool = false,
+         width: CGFloat = 440) {
         self.hotkey = hotkey
         self.acceptedHotkey = hotkey
         self.allowsClearing = allowsClearing
         self.label = NSTextField(labelWithString: text)
-        super.init(frame: NSRect(x: 0, y: 0, width: 300, height: 28))
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: 32))
         // Full auto-layout citizen (It9 real fix): without an intrinsic height the
         // enclosing stack view treated this view as clay — one instance ballooned to
         // 220pt, the other was crushed to 0pt and became invisible.
         translatesAutoresizingMaskIntoConstraints = false
         setContentHuggingPriority(.required, for: .vertical)
         setContentCompressionResistancePriority(.required, for: .vertical)
-        heightAnchor.constraint(equalToConstant: 28).isActive = true
+        heightAnchor.constraint(equalToConstant: 32).isActive = true
         // Explicit width: an NSView has no intrinsic width, and both hosts (stack
         // view and grid view) would otherwise leave it ambiguous.
-        widthAnchor.constraint(equalToConstant: 320).isActive = true
+        widthAnchor.constraint(equalToConstant: width).isActive = true
         setup()
+        updateBorder(accent: false)
         refreshDisplay()
     }
 
@@ -47,18 +51,13 @@ final class HotkeyRecorderView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
     private func setup() {
-        label.font = .systemFont(ofSize: 13)
-        valueField.font = .monospacedSystemFont(ofSize: 13, weight: .medium)
+        label.font = Theme.bodyMedium()
+        valueField.font = Theme.mono()
         valueField.alignment = .center
         valueField.textColor = .controlAccentColor
-        hint.font = .systemFont(ofSize: 11)
-        hint.textColor = .secondaryLabelColor
+        hint.font = Theme.caption()
+        hint.textColor = .tertiaryLabelColor
         hint.stringValue = allowsClearing ? "\(Self.defaultHint)，⌫ 清除" : Self.defaultHint
-
-        wantsLayer = true
-        layer?.cornerRadius = 6
-        layer?.borderColor = NSColor.separatorColor.cgColor
-        layer?.borderWidth = 1
 
         let row = NSStackView(views: [label, valueField])
         row.spacing = 12
@@ -67,10 +66,10 @@ final class HotkeyRecorderView: NSView {
         addSubview(hint)
         hint.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             row.centerYAnchor.constraint(equalTo: centerYAnchor),
             hint.centerYAnchor.constraint(equalTo: centerYAnchor),
-            hint.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            hint.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
         ])
     }
 
@@ -85,20 +84,34 @@ final class HotkeyRecorderView: NSView {
     }
 
     override func becomeFirstResponder() -> Bool {
-        layer?.borderColor = NSColor.controlAccentColor.cgColor
-        layer?.borderWidth = 2
+        updateBorder(accent: true)
         return true
     }
 
     override func resignFirstResponder() -> Bool {
-        layer?.borderColor = NSColor.separatorColor.cgColor
-        layer?.borderWidth = 1
+        updateBorder(accent: false)
         return true
+    }
+
+    /// Filled-field look: soft label-tinted fill; recording state swaps in the
+    /// accent border plus a faint accent wash. Re-applied eagerly (dark/light
+    /// switches re-create the layer contents).
+    private func updateBorder(accent: Bool) {
+        wantsLayer = true
+        needsDisplay = true
+        layer?.cornerRadius = 8
+        layer?.borderWidth = accent ? 2 : 1
+        layer?.borderColor = accent
+            ? NSColor.controlAccentColor.cgColor
+            : NSColor.labelColor.withAlphaComponent(0.12).cgColor
+        layer?.backgroundColor = accent
+            ? NSColor.controlAccentColor.withAlphaComponent(0.08).cgColor
+            : NSColor.labelColor.withAlphaComponent(0.05).cgColor
     }
 
     override func drawFocusRingMask() {
         // Keep the rounded focus ring aligned with the border.
-        NSBezierPath(roundedRect: bounds, xRadius: 6, yRadius: 6).fill()
+        NSBezierPath(roundedRect: bounds, xRadius: 8, yRadius: 8).fill()
     }
 
     override func keyDown(with event: NSEvent) {
@@ -120,9 +133,11 @@ final class HotkeyRecorderView: NSView {
         let candidate = Hotkey(keyCode: UInt32(event.keyCode),
                                modifierFlags: flags.rawValue)
         guard candidate.isValid else {
+            hint.textColor = .systemOrange
             hint.stringValue = "需包含 ⌘/⌥/⌃ 至少一个修饰键"
             return
         }
+        hint.textColor = .tertiaryLabelColor
         hint.stringValue = allowsClearing ? "\(Self.defaultHint)，⌫ 清除" : Self.defaultHint
         // Show the candidate optimistically; the controller validates synchronously
         // inside onHotkeyChanged and calls reject() on failure, restoring the display.
@@ -147,6 +162,7 @@ final class HotkeyRecorderView: NSView {
     /// Rejects the pending candidate: shows the reason and reverts the display
     /// to the last accepted (still-persisted) binding.
     func reject(_ message: String) {
+        hint.textColor = .systemRed
         hint.stringValue = message
         hotkey = acceptedHotkey
         refreshDisplay()

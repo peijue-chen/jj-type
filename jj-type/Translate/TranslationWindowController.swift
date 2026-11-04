@@ -48,9 +48,9 @@ final class TranslationWindowController: NSWindowController {
     private static let frameKey = "jjtype.translationWindowFrame"
 
     private let inputTextView = TranslationInputTextView()
-    private let translateButton = NSButton(title: "翻译", target: nil, action: nil)
-    private let clearButton = NSButton(title: "清空", target: nil, action: nil)
-    private let qrButton = NSButton(title: "二维码", target: nil, action: nil)
+    private let translateButton = Theme.primaryButton("翻译", symbol: "globe")
+    private let clearButton = Theme.button("清空", symbol: "trash")
+    private let qrButton = Theme.button("二维码", symbol: "qrcode")
     private let spinner = NSProgressIndicator()
     private let statusLabel = NSTextField(labelWithString: "")
     private let resultTextView = NSTextView()
@@ -68,6 +68,7 @@ final class TranslationWindowController: NSWindowController {
                               styleMask: [.titled, .closable, .resizable],
                               backing: .buffered, defer: false)
         window.title = "JJType 翻译"
+        window.titlebarSeparatorStyle = .none
         window.isReleasedWhenClosed = false
         window.hidesOnDeactivate = false
         self.init(window: window)
@@ -205,26 +206,27 @@ final class TranslationWindowController: NSWindowController {
         let inputScroll = NSScrollView()
         inputScroll.documentView = inputTextView
         inputScroll.hasVerticalScroller = true
-        inputScroll.borderType = .bezelBorder
+        inputScroll.borderType = .noBorder
+        inputScroll.drawsBackground = false
+        inputScroll.wantsLayer = true
+        inputScroll.layer?.cornerRadius = 6
+        inputScroll.layer?.masksToBounds = true
         inputScroll.translatesAutoresizingMaskIntoConstraints = false
 
         translateButton.target = self
         translateButton.action = #selector(translateClicked)
-        translateButton.bezelStyle = .rounded
 
         clearButton.target = self
         clearButton.action = #selector(clearClicked)
-        clearButton.bezelStyle = .rounded
 
         qrButton.target = self
         qrButton.action = #selector(qrClicked)
-        qrButton.bezelStyle = .rounded
 
         spinner.style = .spinning
         spinner.controlSize = .small
         spinner.isHidden = true
 
-        statusLabel.font = .systemFont(ofSize: 11)
+        statusLabel.font = Theme.caption()
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.lineBreakMode = .byTruncatingTail
 
@@ -236,7 +238,11 @@ final class TranslationWindowController: NSWindowController {
         let resultScroll = NSScrollView()
         resultScroll.documentView = resultTextView
         resultScroll.hasVerticalScroller = true
-        resultScroll.borderType = .bezelBorder
+        resultScroll.borderType = .noBorder
+        resultScroll.drawsBackground = false
+        resultScroll.wantsLayer = true
+        resultScroll.layer?.cornerRadius = 6
+        resultScroll.layer?.masksToBounds = true
         resultScroll.translatesAutoresizingMaskIntoConstraints = false
 
         let buttonsRow = NSStackView(views: [translateButton, clearButton, qrButton,
@@ -244,9 +250,19 @@ final class TranslationWindowController: NSWindowController {
         buttonsRow.spacing = 12
         buttonsRow.alignment = .centerY
 
-        let stack = NSStackView(views: [inputScroll, buttonsRow, resultScroll])
+        // Same grouped-card language as Settings / QR windows.
+        let inputCard = Theme.card()
+        inputCard.content.addArrangedSubview(Theme.sectionHeader("输入"))
+        inputCard.content.addArrangedSubview(inputScroll)
+        inputCard.content.addArrangedSubview(buttonsRow)
+
+        let resultCard = Theme.card()
+        resultCard.content.addArrangedSubview(Theme.sectionHeader("译文"))
+        resultCard.content.addArrangedSubview(resultScroll)
+
+        let stack = NSStackView(views: [inputCard, resultCard])
         stack.orientation = .vertical
-        stack.spacing = 10
+        stack.spacing = 14
         stack.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -254,6 +270,12 @@ final class TranslationWindowController: NSWindowController {
             stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
             stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 14),
             stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -14),
+            inputCard.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            resultCard.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            inputScroll.widthAnchor.constraint(
+                equalTo: inputCard.widthAnchor, constant: -Theme.cardPadding * 2),
+            resultScroll.widthAnchor.constraint(
+                equalTo: resultCard.widthAnchor, constant: -Theme.cardPadding * 2),
             inputScroll.heightAnchor.constraint(equalToConstant: 110),
             resultScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 120),
         ])

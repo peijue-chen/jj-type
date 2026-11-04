@@ -20,16 +20,20 @@ final class QRWindowController: NSWindowController, NSTextViewDelegate {
     // 生成 card
     private let inputTextView = NSTextView()
     private let previewView = NSImageView()
-    private let saveButton = NSButton(title: "保存图片…", target: nil, action: nil)
-    private let copyButton = NSButton(title: "复制图片", target: nil, action: nil)
+    private let saveButton = Theme.primaryButton("保存图片…", symbol: "square.and.arrow.down")
+    private let copyButton = Theme.button("复制图片", symbol: "doc.on.doc")
     private let statusLabel = NSTextField(labelWithString: "")
 
     // 解析 card
-    private let chooseButton = NSButton(title: "选择图片…", target: nil, action: nil)
-    private let decodeButton = NSButton(title: "解析剪贴板图片", target: nil, action: nil)
+    private let chooseButton = Theme.button("选择图片…", symbol: "photo")
+    private let decodeButton = Theme.button("解析剪贴板图片", symbol: "qrcode")
     private let resultTextView = NSTextView()
-    private let resultCopyButton = NSButton(title: "复制结果", target: nil, action: nil)
-    private let openURLButton = NSButton(title: "打开网址", target: nil, action: nil)
+    private let resultCopyButton = Theme.button("复制结果", symbol: "doc.on.doc")
+    private let openURLButton = Theme.button("打开网址", symbol: "arrow.up.forward.app")
+    /// Decode feedback lives IN the decode card (not the generate status line);
+    /// middle-truncation keeps a long file's name start AND extension visible,
+    /// with the full name on hover.
+    private let decodeStatusLabel = NSTextField(labelWithString: "")
 
     private var pendingGenerate: DispatchWorkItem?
     /// Long enough that continuous typing settles before a render; renders
@@ -49,6 +53,7 @@ final class QRWindowController: NSWindowController, NSTextViewDelegate {
                               styleMask: [.titled, .closable, .resizable],
                               backing: .buffered, defer: false)
         window.title = "JJType 二维码"
+        window.titlebarSeparatorStyle = .none
         window.isReleasedWhenClosed = false
         window.hidesOnDeactivate = false
         window.minSize = NSSize(width: 560, height: 480)
@@ -92,54 +97,43 @@ final class QRWindowController: NSWindowController, NSTextViewDelegate {
     private func buildLayout(in view: NSView) {
         // -- 生成 card：左大输入 + 右大预览（预览是视觉中心，参考桌面
         //    QR 工具主流布局：输入即改即见、操作围绕预览）---------------
-        inputTextView.font = .systemFont(ofSize: 14)
+        inputTextView.font = Theme.body()
         inputTextView.isRichText = false
         inputTextView.delegate = self
-        let inputScroll = NSScrollView()
-        inputScroll.documentView = inputTextView
-        inputScroll.hasVerticalScroller = true
-        inputScroll.borderType = .bezelBorder
-        inputScroll.translatesAutoresizingMaskIntoConstraints = false
+        let inputScroll = makeRoundedScroll(for: inputTextView)
 
         previewView.imageScaling = .scaleProportionallyUpOrDown
         previewView.wantsLayer = true
         previewView.layer?.backgroundColor = NSColor.white.cgColor
-        previewView.layer?.cornerRadius = 12
+        previewView.layer?.cornerRadius = 10
         previewView.layer?.masksToBounds = true
         previewView.layer?.borderWidth = 1
-        previewView.layer?.borderColor = NSColor.separatorColor.cgColor
+        previewView.layer?.borderColor = NSColor.labelColor.withAlphaComponent(0.1).cgColor
         previewView.translatesAutoresizingMaskIntoConstraints = false
 
-        for button in [saveButton, copyButton] {
-            button.target = self
-            button.bezelStyle = .rounded
-        }
+        saveButton.target = self
         saveButton.action = #selector(saveImageClicked)
+        copyButton.target = self
         copyButton.action = #selector(copyImageClicked)
         saveButton.isEnabled = false
         copyButton.isEnabled = false
-        // Primary action gets the accent tint (standards-ish emphasis).
-        saveButton.bezelColor = .controlAccentColor
 
         let generateRow = NSStackView(views: [saveButton, copyButton])
         generateRow.spacing = 10
 
-        statusLabel.font = .systemFont(ofSize: 11)
+        statusLabel.font = Theme.caption()
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.lineBreakMode = .byTruncatingTail
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        let inputCaption = captionLabel("输入内容")
-        let previewCaption = captionLabel("预览")
-
-        let inputColumn = NSStackView(views: [inputCaption, inputScroll,
+        let inputColumn = NSStackView(views: [captionLabel("输入内容"), inputScroll,
                                                generateRow, statusLabel])
         inputColumn.orientation = .vertical
         inputColumn.spacing = 8
         inputColumn.alignment = .leading
         inputColumn.translatesAutoresizingMaskIntoConstraints = false
 
-        let previewColumn = NSStackView(views: [previewCaption, previewView])
+        let previewColumn = NSStackView(views: [captionLabel("预览"), previewView])
         previewColumn.orientation = .vertical
         previewColumn.spacing = 8
         previewColumn.alignment = .centerX
@@ -152,36 +146,28 @@ final class QRWindowController: NSWindowController, NSTextViewDelegate {
         generateContent.distribution = .fill
         generateContent.translatesAutoresizingMaskIntoConstraints = false
 
-        let generateBox = titledBox("生成二维码")
-        generateBox.contentView = wrapInBoxContent(generateContent)
-        generateBox.translatesAutoresizingMaskIntoConstraints = false
+        let generateCard = Theme.card()
+        generateCard.content.addArrangedSubview(sectionLabel("生成二维码"))
+        generateCard.content.addArrangedSubview(generateContent)
 
         // -- 解析 card ------------------------------------------------------
-        for button in [chooseButton, decodeButton] {
-            button.target = self
-            button.bezelStyle = .rounded
-        }
+        chooseButton.target = self
         chooseButton.action = #selector(chooseImageClicked)
+        decodeButton.target = self
         decodeButton.action = #selector(decodeClipboardClicked)
 
-        resultTextView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        resultTextView.font = Theme.mono()
         resultTextView.isEditable = false
         resultTextView.isSelectable = true
         resultTextView.isRichText = false
         resultTextView.backgroundColor = .textBackgroundColor
-        let resultScroll = NSScrollView()
-        resultScroll.documentView = resultTextView
-        resultScroll.hasVerticalScroller = true
-        resultScroll.borderType = .bezelBorder
-        resultScroll.translatesAutoresizingMaskIntoConstraints = false
+        let resultScroll = makeRoundedScroll(for: resultTextView)
 
         resultCopyButton.target = self
         resultCopyButton.action = #selector(copyResultClicked)
-        resultCopyButton.bezelStyle = .rounded
         resultCopyButton.isEnabled = false
         openURLButton.target = self
         openURLButton.action = #selector(openURLClicked)
-        openURLButton.bezelStyle = .rounded
         openURLButton.isEnabled = false
 
         let decodeRow = NSStackView(views: [chooseButton, decodeButton])
@@ -189,18 +175,19 @@ final class QRWindowController: NSWindowController, NSTextViewDelegate {
         let resultRow = NSStackView(views: [resultCopyButton, openURLButton])
         resultRow.spacing = 12
 
-        let decodeContent = NSStackView(views: [decodeRow, resultScroll, resultRow])
-        decodeContent.orientation = .vertical
-        decodeContent.spacing = 10
-        decodeContent.alignment = .centerX
-        decodeContent.translatesAutoresizingMaskIntoConstraints = false
-
-        let decodeBox = titledBox("解析二维码")
-        decodeBox.contentView = wrapInBoxContent(decodeContent)
-        decodeBox.translatesAutoresizingMaskIntoConstraints = false
+        let decodeCard = Theme.card()
+        decodeCard.content.addArrangedSubview(sectionLabel("解析二维码"))
+        decodeCard.content.addArrangedSubview(decodeRow)
+        decodeStatusLabel.font = Theme.caption()
+        decodeStatusLabel.textColor = .secondaryLabelColor
+        decodeStatusLabel.lineBreakMode = .byTruncatingMiddle
+        decodeStatusLabel.translatesAutoresizingMaskIntoConstraints = false
+        decodeCard.content.addArrangedSubview(decodeStatusLabel)
+        decodeCard.content.addArrangedSubview(resultScroll)
+        decodeCard.content.addArrangedSubview(resultRow)
 
         // -- assembly -------------------------------------------------------
-        let stack = NSStackView(views: [generateBox, decodeBox])
+        let stack = NSStackView(views: [generateCard, decodeCard])
         stack.orientation = .vertical
         stack.spacing = 14
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -211,20 +198,47 @@ final class QRWindowController: NSWindowController, NSTextViewDelegate {
             stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 14),
             stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -14),
 
-            // Input column flexes; preview stays a fixed 236 pt square and
-            // the input field matches that height (equal-column look).
-            inputColumn.widthAnchor.constraint(greaterThanOrEqualToConstant: 240),
+            generateCard.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            decodeCard.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            generateContent.widthAnchor.constraint(
+                equalTo: generateCard.widthAnchor, constant: -Theme.cardPadding * 2),
+            decodeRow.widthAnchor.constraint(
+                equalTo: decodeCard.widthAnchor, constant: -Theme.cardPadding * 2),
+            decodeStatusLabel.widthAnchor.constraint(
+                equalTo: decodeCard.widthAnchor, constant: -Theme.cardPadding * 2),
+            resultScroll.widthAnchor.constraint(
+                equalTo: decodeCard.widthAnchor, constant: -Theme.cardPadding * 2),
+            resultRow.widthAnchor.constraint(
+                equalTo: decodeCard.widthAnchor, constant: -Theme.cardPadding * 2),
+
+            // Half/half split: input column and preview column each take one
+            // half minus half the 16 pt stack spacing; preview stays centered
+            // in its half, both areas 236 pt tall.
+            inputColumn.widthAnchor.constraint(equalTo: generateContent.widthAnchor,
+                                               multiplier: 0.5, constant: -8),
+            previewColumn.widthAnchor.constraint(equalTo: generateContent.widthAnchor,
+                                                 multiplier: 0.5, constant: -8),
             previewView.widthAnchor.constraint(equalToConstant: 236),
             previewView.heightAnchor.constraint(equalToConstant: 236),
             inputScroll.widthAnchor.constraint(equalTo: inputColumn.widthAnchor),
             inputScroll.heightAnchor.constraint(equalToConstant: 236),
             generateRow.leadingAnchor.constraint(equalTo: inputColumn.leadingAnchor),
-
-            decodeRow.widthAnchor.constraint(equalTo: decodeContent.widthAnchor, constant: -24),
-            resultScroll.widthAnchor.constraint(equalTo: decodeContent.widthAnchor, constant: -24),
             resultScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 64),
-            resultRow.widthAnchor.constraint(equalTo: decodeContent.widthAnchor, constant: -24),
         ])
+    }
+
+    /// Borderless rounded text scroller shared by the input and result areas.
+    private func makeRoundedScroll(for textView: NSTextView) -> NSScrollView {
+        let scroll = NSScrollView()
+        scroll.documentView = textView
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .noBorder
+        scroll.drawsBackground = false
+        scroll.wantsLayer = true
+        scroll.layer?.cornerRadius = 6
+        scroll.layer?.masksToBounds = true
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        return scroll
     }
 
     /// Small section caption shared by the two generate columns.
@@ -235,31 +249,9 @@ final class QRWindowController: NSWindowController, NSTextViewDelegate {
         return label
     }
 
-    /// Group-box card with a small bold title (system-styled, dark-mode aware).
-    private func titledBox(_ title: String) -> NSBox {
-        let box = NSBox()
-        box.title = title
-        box.boxType = .secondary
-        box.titleFont = .systemFont(ofSize: 12, weight: .semibold)
-        box.titlePosition = .atTop
-        box.contentViewMargins = NSSize(width: 0, height: 0)
-        return box
-    }
-
-    /// NSBox frame-manages its contentView directly, so a constraint-driven
-    /// stack assigned AS the contentView gets no edge constraints and floats
-    /// loose (the "UI 全乱" bug). Wrap it: the plain container is frame-laid-
-    /// out by the box, the stack is constraint-pinned inside with padding.
-    private func wrapInBoxContent(_ stack: NSStackView) -> NSView {
-        let container = NSView()
-        container.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
-            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
-            stack.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
-            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -12),
-        ])
-        return container
+    /// Card section header (Theme language, same as settings pages).
+    private func sectionLabel(_ text: String) -> NSTextField {
+        Theme.sectionHeader(text)
     }
 
     // MARK: - Generation (debounced)
@@ -342,10 +334,17 @@ final class QRWindowController: NSWindowController, NSTextViewDelegate {
 
     // MARK: - Decode (clipboard image or picked file)
 
+    /// Decode-card status write: middle truncation + full name on hover.
+    private func setDecodeStatus(_ text: String, error: Bool = false, tooltip: String? = nil) {
+        decodeStatusLabel.textColor = error ? .systemRed : .secondaryLabelColor
+        decodeStatusLabel.stringValue = text
+        decodeStatusLabel.toolTip = tooltip ?? text
+    }
+
     @objc private func decodeClipboardClicked() {
         let pasteboard = NSPasteboard.general
         guard let data = pasteboard.data(forType: .png) ?? pasteboard.data(forType: .tiff) else {
-            setStatus("剪贴板中没有图片", color: .systemRed, fades: true)
+            setDecodeStatus("剪贴板中没有图片", error: true)
             return
         }
         decode(data: data, sourceName: "剪贴板")
@@ -357,18 +356,23 @@ final class QRWindowController: NSWindowController, NSTextViewDelegate {
         panel.allowedContentTypes = [.png, .jpeg, .image]
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
-        guard panel.runModal() == .OK, let url = panel.url,
-              let data = try? Data(contentsOf: url) else { return }
-        decode(data: data, sourceName: url.lastPathComponent)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let data = try Data(contentsOf: url)
+            decode(data: data, sourceName: url.lastPathComponent)
+        } catch {
+            setDecodeStatus("无法读取「\(url.lastPathComponent)」：\(error.localizedDescription)",
+                            error: true, tooltip: url.path)
+        }
     }
 
     /// Shared decode chain: image bytes → background Vision → result UI.
     private func decode(data: Data, sourceName: String) {
         guard let image = NSBitmapImageRep(data: data)?.cgImage else {
-            setStatus("无法读取图片（\(sourceName)）", color: .systemRed, fades: true)
+            setDecodeStatus("无法读取图片（\(sourceName)）", error: true)
             return
         }
-        setStatus("正在解析 \(sourceName)…", color: .secondaryLabelColor, fades: false)
+        setDecodeStatus("正在解析 \(sourceName)…", tooltip: sourceName)
         Task { @MainActor in
             do {
                 let payloads = try await Task.detached(priority: .userInitiated) {
@@ -389,14 +393,15 @@ final class QRWindowController: NSWindowController, NSTextViewDelegate {
                     lastPayloadURL = nil
                     openURLButton.isEnabled = false
                 }
-                setStatus("已识别 \(payloads.count) 个二维码", color: .secondaryLabelColor, fades: true)
+                setDecodeStatus("来源：\(sourceName) · 已识别 \(payloads.count) 个二维码",
+                                tooltip: sourceName)
             } catch {
                 resultTextView.string = ""
                 resultCopyButton.isEnabled = false
                 openURLButton.isEnabled = false
                 lastPayloadURL = nil
-                setStatus((error as? LocalizedError)?.errorDescription ?? error.localizedDescription,
-                          color: .systemRed, fades: true)
+                setDecodeStatus((error as? LocalizedError)?.errorDescription
+                                ?? error.localizedDescription, error: true)
             }
         }
     }
