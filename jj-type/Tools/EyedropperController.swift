@@ -5,9 +5,13 @@
 //  Screen color picker: ⌥P (configurable) starts a session — a loupe panel
 //  follows the cursor (offset, so clicks never hit the loupe), showing an
 //  8×-magnified pixel grid sampled via CGDisplayCreateImage (needs the Screen
-//  Recording grant, gated by AppDelegate). Click or ⏎ picks and copies
-//  (HEX by default, Space toggles RGB), Esc cancels. Recent picks persist as
-//  a small swatch history.
+//  Recording grant, gated by AppDelegate). Tracking is THREE-layered: global
+//  mouseMoved monitor (instant, other apps' windows), local mouseMoved
+//  monitor (moves routed to our own windows never reach the global one) and
+//  a 30 fps cursor poll (catch-all for apps with their own event taps) —
+//  sampling only fires when the cursor actually moved. Click or ⏎ picks and
+//  copies (HEX by default, Space toggles RGB), Esc cancels. Recent picks
+//  persist as a small swatch history.
 //
 //  Coordinate note: the panel is positioned in AppKit (bottom-left) space;
 //  sampling converts to CoreGraphics (top-left) per screen before cropping.
@@ -26,6 +30,11 @@ final class EyedropperController {
     private let hintLabel = NSTextField(labelWithString: "点击取色 · 空格切换格式 · Esc 取消")
     private let historyRow = NSStackView()
     private var monitors: [Any] = []
+    /// Safety net for the global-monitor blind spots: moves routed to OUR
+    /// own windows (app active) or swallowed by apps with their own event
+    /// taps never reach a GLOBAL monitor — the poll keeps the loupe tracking.
+    private var pollTimer: Timer?
+    private var lastSampledPoint = NSPoint(x: -1, y: -1)
 
     private var isRunning = false
     private var useRGB = false
@@ -108,11 +117,15 @@ final class EyedropperController {
         rebuildHistorySwatches()
         installMonitors()
         panel.orderFrontRegardless()
-        sample(at: NSEvent.mouseLocation)
+        lastSampledPoint = NSEvent.mouseLocation
+        sample(at: lastSampledPoint)
+        startPolling()
     }
 
     private func end() {
         removeMonitors()
+        pollTimer?.invalidate()
+        pollTimer = nil
         panel.orderOut(nil)
         isRunning = false
         currentColor = nil
@@ -125,6 +138,14 @@ final class EyedropperController {
                                                                   .otherMouseDragged]) {
             [weak self] _ in
             MainActor.assumeIsolated { self?.sample(at: NSEvent.mouseLocation) }
+        }
+        // Moves delivered to OUR windows go to the local stream, never the
+        // global one — mirror them or the loupe freezes over JJType windows.
+        let localMoved = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged,
+                                                                      .otherMouseDragged]) {
+            [weak self] event in
+            MainActor.assumeIsolated { self?.sample(at: NSEvent.mouseLocation) }
+            return event
         }
         let down = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] _ in
             MainActor.assumeIsolated { self?.pick() }
@@ -140,7 +161,27 @@ final class EyedropperController {
             MainActor.assumeIsolated { self?.handleKey(event) }
             return nil
         }
-        monitors = [moved, down, localDown, key, localKey].compactMap { $0 }
+        monitors = [moved, localMoved, down, localDown, key, localKey].compactMap { $0 }
+    }
+
+    /// 30 fps cursor poll — samples ONLY when the location actually moved
+    /// (>0.25 pt), so idle cost is negligible. This is the catch-all that
+    /// makes the loupe follow in every case the monitors miss.
+    private func startPolling() {
+        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.isRunning else { return }
+                let point = NSEvent.mouseLocation
+                if abs(point.x - self.lastSampledPoint.x) > 0.25 ||
+                    abs(point.y - self.lastSampledPoint.y) > 0.25 {
+                    self.sample(at: point)
+                }
+            }
+        }
+        // .common keeps the poll alive while a menu is open or during event
+        // tracking (drag loops) — .default-mode timers pause in both.
+        RunLoop.main.add(timer, forMode: .common)
+        pollTimer = timer
     }
 
     private func removeMonitors() {
@@ -165,6 +206,7 @@ final class EyedropperController {
     // MARK: - Sampling
 
     private func sample(at point: NSPoint) {
+        lastSampledPoint = point
         guard let screen = NSScreen.screens.first(where: { $0.frame.contains(point) }),
               let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")]
                   as? CGDirectDisplayID else { return }
