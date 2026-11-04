@@ -154,6 +154,16 @@ final class CaptureOverlayController {
         let origin = currentSelection.origin
 
         switch action {
+        case .qr:
+            // QR reads the COMPOSITED pixels — what the user sees (annotations
+            // may complete a partially drawn code; Vision tolerates the noise).
+            teardown()
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let image = await Self.composite(base: base, selection: currentSelection,
+                                                 items: items)
+                self.recognizeQR(from: image)
+            }
         case .recognize:
             // OCR reads the untouched pixels: annotations would only add noise.
             teardown()
@@ -449,6 +459,50 @@ final class CaptureOverlayController {
         return await Task.detached(priority: .userInitiated) {
             AnnotationRenderer.compose(base, selection: selection, items: items)
         }.value
+    }
+
+    /// QR decode (utils-5): payloads go straight to the pasteboard; a single
+    /// http(s) payload additionally offers the open action. Never silent.
+    private func recognizeQR(from image: CGImage) {
+        CaptureToast.shared.show("正在识别二维码…", symbol: "qrcode", duration: 20)
+        Task { @MainActor in
+            do {
+                let payloads = try await Task.detached(priority: .userInitiated) {
+                    try QRService.recognizeQR(in: image)
+                }.value
+                guard let first = payloads.first, !first.isEmpty else {
+                    throw QRError.noQRCode
+                }
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                pasteboard.setString(payloads.joined(separator: "\n"), forType: .string)
+
+                if payloads.count == 1,
+                   let url = URL(string: first),
+                   ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+                    CaptureToast.shared.show("已识别二维码，已复制到剪贴板",
+                                             symbol: "qrcode", duration: 1.4)
+                    // A modal under the user's frontmost window is unreachable —
+                    // activate first (same reason as the system-command alerts).
+                    NSApp.activate(ignoringOtherApps: true)
+                    let alert = NSAlert()
+                    alert.messageText = "识别到网址"
+                    alert.informativeText = first
+                    alert.addButton(withTitle: "打开网址")
+                    alert.addButton(withTitle: "关闭")
+                    if alert.runModal() == .alertFirstButtonReturn {
+                        NSWorkspace.shared.open(url)
+                    }
+                } else {
+                    CaptureToast.shared.show("已识别 \(payloads.count) 个二维码，已复制到剪贴板",
+                                             symbol: "qrcode", duration: 2.2)
+                }
+            } catch let error as QRError {
+                CaptureToast.shared.show(error.localizedDescription, symbol: "qrcode", duration: 2.2)
+            } catch {
+                CaptureToast.shared.show(Self.message(for: error), symbol: "qrcode", duration: 2.2)
+            }
+        }
     }
 
     /// Decision #7: the recognised text goes straight to the pasteboard — and

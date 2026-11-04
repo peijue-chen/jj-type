@@ -33,7 +33,7 @@ final class SettingsWindowController: NSWindowController {
     // One page per feature group. Adding a feature area = add a title here and a
     // matching `make…Page()` in `buildLayout`; nothing else has to change.
 
-    private let sectionControl = NSSegmentedControl(labels: ["AI 服务", "快捷键", "快捷启动", "终端", "截图"],
+    private let sectionControl = NSSegmentedControl(labels: ["AI 服务", "快捷键", "快捷启动", "终端", "截图", "划词动作"],
                                                     trackingMode: .selectOne,
                                                     target: nil,
                                                     action: nil)
@@ -54,8 +54,23 @@ final class SettingsWindowController: NSWindowController {
     private var correctRecorder: HotkeyRecorderView?
     private var captureRecorder: HotkeyRecorderView?
     private var launcherRecorder: HotkeyRecorderView?
+    private var clipboardRecorder: HotkeyRecorderView?
+    private var colorPickerRecorder: HotkeyRecorderView?
+    private var qrCodeRecorder: HotkeyRecorderView?
     private let captureDirectoryLabel = NSTextField(labelWithString: "")
     private let captureFormatPopup = NSPopUpButton()
+    /// Custom AI quick-action editor (Tools page). Item 0 of the popup is
+    /// always "new action"; higher indices map to store.aiActions.
+    private let aiActionPopup = NSPopUpButton()
+    private let aiActionNameField = NSTextField()
+    private let aiActionPromptTextView = NSTextView()
+    private var editingAIActionId: UUID?
+    /// Edit forms start HIDDEN (utils-7 follow-up): they appear on 新建 /
+    /// row selection, disappear after delete / cancel / empty selection.
+    private let providerFormContainer = NSView()
+    private let launchFormContainer = NSView()
+    private let aiActionFormContainer = NSView()
+    private let aiActionDeleteButton = NSButton(title: "删除", target: nil, action: nil)
 
     // Launch items page (Alfred-style: one shortcut → one app/folder/file/URL).
     private let launchTable = NSTableView()
@@ -140,7 +155,7 @@ final class SettingsWindowController: NSWindowController {
         ])
 
         pages = [makeProvidersPage(), makeHotkeyPage(), makeLaunchPage(),
-                 makeTerminalPage(), makeCapturePage()]
+                 makeTerminalPage(), makeCapturePage(), makeToolsPage()]
         if let first = pages.first {
             show(page: first)
         }
@@ -218,9 +233,29 @@ final class SettingsWindowController: NSWindowController {
             scroll.widthAnchor.constraint(equalToConstant: Self.pageWidth),
         ])
 
+        // The edit form starts hidden — it appears on 新建 / row selection.
+        providerFormContainer.isHidden = true
+        providerFormContainer.translatesAutoresizingMaskIntoConstraints = false
+        formGrid.translatesAutoresizingMaskIntoConstraints = false
+        actionRow.translatesAutoresizingMaskIntoConstraints = false
+        testResultLabel.translatesAutoresizingMaskIntoConstraints = false
+        providerFormContainer.addSubview(formGrid)
+        providerFormContainer.addSubview(actionRow)
+        providerFormContainer.addSubview(testResultLabel)
+        NSLayoutConstraint.activate([
+            formGrid.leadingAnchor.constraint(equalTo: providerFormContainer.leadingAnchor),
+            formGrid.trailingAnchor.constraint(lessThanOrEqualTo: providerFormContainer.trailingAnchor),
+            formGrid.topAnchor.constraint(equalTo: providerFormContainer.topAnchor),
+            actionRow.leadingAnchor.constraint(equalTo: providerFormContainer.leadingAnchor),
+            actionRow.topAnchor.constraint(equalTo: formGrid.bottomAnchor, constant: 10),
+            testResultLabel.leadingAnchor.constraint(equalTo: providerFormContainer.leadingAnchor),
+            testResultLabel.topAnchor.constraint(equalTo: actionRow.bottomAnchor, constant: 6),
+            testResultLabel.bottomAnchor.constraint(equalTo: providerFormContainer.bottomAnchor),
+        ])
+
         return makePage([
             makeHint("OpenAI 兼容接口：Base URL 需含 /v1，API Key 只保存在系统钥匙串。"),
-            scroll, listRow, formGrid, actionRow, testResultLabel,
+            scroll, listRow, providerFormContainer,
         ])
     }
 
@@ -230,19 +265,206 @@ final class SettingsWindowController: NSWindowController {
         let correct = HotkeyRecorderView(label: "纠正 + 翻译", hotkey: store.correctHotkey)
         let capture = HotkeyRecorderView(label: "截图", hotkey: store.captureHotkey)
         let launcher = HotkeyRecorderView(label: "启动器", hotkey: store.launcherHotkey)
+        let clipboard = HotkeyRecorderView(label: "剪贴板历史", hotkey: store.clipboardHotkey)
+        let colorPicker = HotkeyRecorderView(label: "取色", hotkey: store.colorPickerHotkey)
+        let qrCode = HotkeyRecorderView(label: "二维码", hotkey: store.qrCodeHotkey)
         translate.onHotkeyChanged = { [weak self] hotkey in self?.applyHotkey(.translate, hotkey) }
         correct.onHotkeyChanged = { [weak self] hotkey in self?.applyHotkey(.correctAndTranslate, hotkey) }
         capture.onHotkeyChanged = { [weak self] hotkey in self?.applyHotkey(.capture, hotkey) }
         launcher.onHotkeyChanged = { [weak self] hotkey in self?.applyHotkey(.launcher, hotkey) }
+        clipboard.onHotkeyChanged = { [weak self] hotkey in self?.applyHotkey(.clipboardHistory, hotkey) }
+        colorPicker.onHotkeyChanged = { [weak self] hotkey in self?.applyHotkey(.colorPicker, hotkey) }
+        qrCode.onHotkeyChanged = { [weak self] hotkey in self?.applyHotkey(.qrCode, hotkey) }
         translateRecorder = translate
         correctRecorder = correct
         captureRecorder = capture
         launcherRecorder = launcher
+        clipboardRecorder = clipboard
+        colorPickerRecorder = colorPicker
+        qrCodeRecorder = qrCode
 
         return makePage([
-            translate, correct, capture, launcher,
+            translate, correct, capture, launcher, clipboard, colorPicker, qrCode,
             makeHint("点击输入框后直接按下新组合键；需包含 ⌘/⌥/⌃ 至少一个修饰键。"),
         ])
+    }
+
+    /// Page 6: 划词动作 — selection action bar toggle + editable quick actions
+    /// (built-ins seeded, editable, not deletable) + clipboard history tools.
+    private func makeToolsPage() -> NSStackView {
+        // -- 划词动作条开关 ------------------------------------------------
+        let barToggle = NSButton(checkboxWithTitle: "划词后自动显示动作条",
+                                 target: self, action: #selector(selectionBarToggled(_:)))
+        barToggle.state = store.selectionBarEnabled ? .on : .off
+
+        let newActionButton = NSButton(title: "新建动作…", target: self,
+                                       action: #selector(newAIActionClicked))
+        newActionButton.bezelStyle = .rounded
+        let actionListRow = NSStackView(views: [newActionButton])
+        actionListRow.spacing = 8
+
+        // -- 动作编辑表单（默认隐藏）---------------------------------------
+        aiActionPopup.target = self
+        aiActionPopup.action = #selector(aiActionPopupChanged)
+        aiActionNameField.placeholderString = "动作名称（如：总结）"
+        aiActionPromptTextView.font = .systemFont(ofSize: 12)
+        aiActionPromptTextView.isRichText = false
+        aiActionPromptTextView.isEditable = true
+        aiActionPromptTextView.drawsBackground = true
+        refreshAIActionPopup(selectingId: nil)
+
+        let promptScroll = NSScrollView()
+        promptScroll.documentView = aiActionPromptTextView
+        promptScroll.hasVerticalScroller = true
+        promptScroll.borderType = .bezelBorder
+        promptScroll.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            promptScroll.heightAnchor.constraint(equalToConstant: 72),
+            promptScroll.widthAnchor.constraint(equalToConstant: 300),
+        ])
+
+        let saveButton = NSButton(title: "保存", target: self, action: #selector(saveAIAction))
+        saveButton.bezelStyle = .rounded
+        aiActionDeleteButton.target = self
+        aiActionDeleteButton.action = #selector(deleteAIAction)
+        aiActionDeleteButton.bezelStyle = .rounded
+        let cancelButton = NSButton(title: "取消", target: self, action: #selector(cancelAIAction))
+        cancelButton.bezelStyle = .rounded
+        let editorRow = NSStackView(views: [saveButton, aiActionDeleteButton, cancelButton])
+        editorRow.spacing = 8
+
+        let formGrid = NSGridView(views: [
+            [formLabel("动作"), aiActionPopup],
+            [formLabel("名称"), aiActionNameField],
+            [formLabel("提示词"), promptScroll],
+        ])
+        formGrid.column(at: 0).xPlacement = .trailing
+        formGrid.rowSpacing = 8
+        formGrid.translatesAutoresizingMaskIntoConstraints = false
+        editorRow.translatesAutoresizingMaskIntoConstraints = false
+
+        aiActionFormContainer.isHidden = true
+        aiActionFormContainer.translatesAutoresizingMaskIntoConstraints = false
+        aiActionFormContainer.addSubview(formGrid)
+        aiActionFormContainer.addSubview(editorRow)
+        NSLayoutConstraint.activate([
+            formGrid.leadingAnchor.constraint(equalTo: aiActionFormContainer.leadingAnchor),
+            formGrid.trailingAnchor.constraint(lessThanOrEqualTo: aiActionFormContainer.trailingAnchor),
+            formGrid.topAnchor.constraint(equalTo: aiActionFormContainer.topAnchor),
+            editorRow.leadingAnchor.constraint(equalTo: aiActionFormContainer.leadingAnchor),
+            editorRow.topAnchor.constraint(equalTo: formGrid.bottomAnchor, constant: 10),
+            editorRow.bottomAnchor.constraint(equalTo: aiActionFormContainer.bottomAnchor),
+        ])
+
+        // -- 其它工具 --------------------------------------------------------
+        let clearButton = NSButton(title: "清空剪贴板历史", target: self,
+                                   action: #selector(clearClipboardHistory))
+        clearButton.bezelStyle = .rounded
+
+        let separator1 = NSBox()
+        separator1.boxType = .separator
+        let separator2 = NSBox()
+        separator2.boxType = .separator
+
+        return makePage([
+            barToggle,
+            makeHint("在任意应用拖选文字后，鼠标下方自动出现动作条（复制 / AI 动作 / 二维码）；点击其它位置立即消失。需要辅助功能权限。"),
+            separator1,
+            actionListRow,
+            aiActionFormContainer,
+            makeHint("内置 翻译 / 润色 / 改写 与自定义动作统一在此管理；提示词用 {text} 代表选中文本。内置动作可修改提示词，不可删除。"),
+            separator2,
+            clearButton,
+            makeHint("剪贴板历史记录复制的文本与图片（上限 500 条，重启保留）；敏感复制自动跳过。"),
+        ])
+    }
+
+    @objc private func selectionBarToggled(_ sender: NSButton) {
+        let enabled = sender.state == .on
+        store.selectionBarEnabled = enabled
+        SelectionActionBarController.shared.setEnabled(enabled)
+    }
+
+    @objc private func clearClipboardHistory() {
+        ClipboardHistoryService.shared.clearAll()
+        CaptureToast.shared.show("已清空剪贴板历史", symbol: "trash")
+    }
+
+    // MARK: - Custom AI quick actions (Tools page)
+
+    private func refreshAIActionPopup(selectingId: UUID?) {
+        aiActionPopup.removeAllItems()
+        aiActionPopup.addItem(withTitle: "＋ 新建动作…")
+        for action in store.aiActions {
+            aiActionPopup.addItem(withTitle: action.name)
+        }
+        if let id = selectingId,
+           let index = store.aiActions.firstIndex(where: { $0.id == id }) {
+            aiActionPopup.selectItem(at: index + 1)
+        } else {
+            aiActionPopup.selectItem(at: 0)
+        }
+        syncAIActionFields()
+    }
+
+    private func syncAIActionFields() {
+        let index = aiActionPopup.indexOfSelectedItem - 1
+        if store.aiActions.indices.contains(index) {
+            let action = store.aiActions[index]
+            editingAIActionId = action.id
+            aiActionNameField.stringValue = action.name
+            aiActionPromptTextView.string = action.prompt
+            // Built-ins are editable but never deletable.
+            aiActionDeleteButton.isEnabled = !QuickActionCatalog.builtInIds.contains(action.id)
+        } else {
+            editingAIActionId = nil
+            aiActionNameField.stringValue = ""
+            aiActionPromptTextView.string = ""
+            aiActionDeleteButton.isEnabled = true
+        }
+    }
+
+    @objc private func newAIActionClicked() {
+        aiActionPopup.selectItem(at: 0)
+        syncAIActionFields()
+        aiActionFormContainer.isHidden = false
+        window?.makeFirstResponder(aiActionNameField)
+    }
+
+    @objc private func aiActionPopupChanged() {
+        syncAIActionFields()
+        aiActionFormContainer.isHidden = false
+    }
+
+    @objc private func cancelAIAction() {
+        editingAIActionId = nil
+        aiActionFormContainer.isHidden = true
+        refreshAIActionPopup(selectingId: nil)
+    }
+
+    @objc private func saveAIAction() {
+        let name = aiActionNameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prompt = aiActionPromptTextView.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, !prompt.isEmpty else {
+            showAlert("请填写动作名称和提示词", "名称与提示词都不能为空。")
+            return
+        }
+        if let id = editingAIActionId {
+            store.updateAIAction(QuickAction(id: id, name: name, prompt: prompt))
+        } else {
+            let action = QuickAction(id: UUID(), name: name, prompt: prompt)
+            store.addAIAction(action)
+            editingAIActionId = action.id
+        }
+        refreshAIActionPopup(selectingId: editingAIActionId)
+        aiActionFormContainer.isHidden = true
+    }
+
+    @objc private func deleteAIAction() {
+        guard let id = editingAIActionId else { return }
+        store.deleteAIAction(id: id)
+        refreshAIActionPopup(selectingId: nil)
+        aiActionFormContainer.isHidden = true
     }
 
     /// Page 3: launch items — one global shortcut per app / folder / file / URL.
@@ -305,8 +527,24 @@ final class SettingsWindowController: NSWindowController {
         let hint = makeHint(Self.launchHintText(launcherHotkey: store.launcherHotkey))
         launchHintLabel = hint
 
+        // The edit form starts hidden — it appears on 新建 / row selection.
+        launchFormContainer.isHidden = true
+        launchFormContainer.translatesAutoresizingMaskIntoConstraints = false
+        grid.translatesAutoresizingMaskIntoConstraints = false
+        launchSaveButton.translatesAutoresizingMaskIntoConstraints = false
+        launchFormContainer.addSubview(grid)
+        launchFormContainer.addSubview(launchSaveButton)
+        NSLayoutConstraint.activate([
+            grid.leadingAnchor.constraint(equalTo: launchFormContainer.leadingAnchor),
+            grid.trailingAnchor.constraint(lessThanOrEqualTo: launchFormContainer.trailingAnchor),
+            grid.topAnchor.constraint(equalTo: launchFormContainer.topAnchor),
+            launchSaveButton.leadingAnchor.constraint(equalTo: launchFormContainer.leadingAnchor),
+            launchSaveButton.topAnchor.constraint(equalTo: grid.bottomAnchor, constant: 10),
+            launchSaveButton.bottomAnchor.constraint(equalTo: launchFormContainer.bottomAnchor),
+        ])
+
         return makePage([
-            hint, scroll, listRow, grid, launchSaveButton,
+            hint, scroll, listRow, launchFormContainer,
             makeHint("App 按 Bundle ID 记录，移动位置后仍可用；文件夹 / 文件按绝对路径记录。快捷键留空即只用菜单打开。"),
         ])
     }
@@ -495,6 +733,8 @@ final class SettingsWindowController: NSWindowController {
             saveButton.isEnabled = false
             activeButton.isEnabled = false
             activeButton.state = .off
+            // No selection → the edit form collapses away.
+            providerFormContainer.isHidden = true
             return
         }
         let provider = store.providers[row]
@@ -507,6 +747,8 @@ final class SettingsWindowController: NSWindowController {
         saveButton.isEnabled = true
         activeButton.isEnabled = true
         activeButton.state = provider.id == store.activeProviderId ? .on : .off
+        // A selected row opens its edit form.
+        providerFormContainer.isHidden = false
     }
 
     // MARK: - Launch item binding
@@ -552,6 +794,8 @@ final class SettingsWindowController: NSWindowController {
             launchRecorder?.setHotkey(nil)
             launchSaveButton.isEnabled = false
             updateLaunchTargetUI()
+            // No selection → the edit form collapses away.
+            launchFormContainer.isHidden = true
             return
         }
         editingLaunchId = item.id
@@ -561,6 +805,8 @@ final class SettingsWindowController: NSWindowController {
         launchRecorder?.setHotkey(item.hotkey)
         launchSaveButton.isEnabled = true
         updateLaunchTargetUI()
+        // An edited item opens its edit form.
+        launchFormContainer.isHidden = false
     }
 
     private var selectedLaunchKind: LaunchTargetKind {
@@ -745,6 +991,9 @@ final class SettingsWindowController: NSWindowController {
         case .correctAndTranslate: return store.correctHotkey
         case .capture: return store.captureHotkey
         case .launcher: return store.launcherHotkey
+        case .clipboardHistory: return store.clipboardHotkey
+        case .colorPicker: return store.colorPickerHotkey
+        case .qrCode: return store.qrCodeHotkey
         }
     }
 
@@ -756,6 +1005,9 @@ final class SettingsWindowController: NSWindowController {
         case .launcher:
             store.launcherHotkey = hotkey
             launchHintLabel?.stringValue = Self.launchHintText(launcherHotkey: hotkey)
+        case .clipboardHistory: store.clipboardHotkey = hotkey
+        case .colorPicker: store.colorPickerHotkey = hotkey
+        case .qrCode: store.qrCodeHotkey = hotkey
         }
     }
 
@@ -765,6 +1017,9 @@ final class SettingsWindowController: NSWindowController {
         case .correctAndTranslate: return correctRecorder
         case .capture: return captureRecorder
         case .launcher: return launcherRecorder
+        case .clipboardHistory: return clipboardRecorder
+        case .colorPicker: return colorPickerRecorder
+        case .qrCode: return qrCodeRecorder
         }
     }
 
@@ -946,6 +1201,9 @@ final class SettingsWindowController: NSWindowController {
         if store.correctHotkey == hotkey { return "纠正 + 翻译" }
         if store.captureHotkey == hotkey { return "截图" }
         if store.launcherHotkey == hotkey { return "启动器" }
+        if store.clipboardHotkey == hotkey { return "剪贴板历史" }
+        if store.colorPickerHotkey == hotkey { return "取色" }
+        if store.qrCodeHotkey == hotkey { return "二维码" }
         return store.launchItems.first { $0.id != id && $0.hotkey == hotkey }?.name
     }
 

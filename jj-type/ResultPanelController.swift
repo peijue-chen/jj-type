@@ -26,6 +26,14 @@ final class ResultPanelController: NSObject {
     private let replaceButton = NSButton(title: "替换原文", target: nil, action: nil)
     private let copyButton = NSButton(title: "复制", target: nil, action: nil)
     private let closeButton = NSButton(title: "关闭", target: nil, action: nil)
+    /// AI quick-action chips (built-ins + custom), shown in the result state.
+    private let actionsRow = NSStackView()
+
+    /// Set by AppDelegate before each flow; clicking a chip fires this.
+    var quickActions: [QuickAction] = []
+    var onQuickAction: ((QuickAction) -> Void)?
+    /// QR chip: generates a code for the captured source text (utils-5).
+    var onGenerateQR: (() -> Void)?
 
     private var replaceText: String?
     private var globalMonitors: [Any] = []
@@ -66,12 +74,18 @@ final class ResultPanelController: NSObject {
         self.onDismiss = onDismiss
         cancelAutoDismiss()
         statusLabel.stringValue = mode == .translate ? "正在翻译…" : "正在纠正并翻译…"
+        // Chips show DURING loading too (utils-3 follow-up): the actions are
+        // visible the moment the panel appears, and clicking one cancels the
+        // in-flight request and switches action (latest-wins in AppDelegate).
+        rebuildQuickActionButtons()
         setState(.loading)
         present(near: point)
     }
 
     func showResult(_ result: GrammarResult, replaceEnabled: Bool) {
         let hasCorrected = !result.corrected.isEmpty
+        // A quick action may have re-titled the caption; restore the default.
+        translationCaption.stringValue = "翻译"
         correctedLabel.stringValue = result.corrected
         translationLabel.stringValue = result.translation
         replaceText = hasCorrected ? result.corrected : result.translation
@@ -89,6 +103,45 @@ final class ResultPanelController: NSObject {
             copyButton.title = "复制"
         }
         setState(.result)
+        rebuildQuickActionButtons()
+        refit()
+    }
+
+    /// Quick action in flight: same loading state, action-specific label.
+    /// When triggered from the selection bar the panel is NOT on screen yet —
+    /// it must present itself near the cursor or the action looks dead.
+    func showQuickLoading(actionName: String) {
+        cancelAutoDismiss()
+        statusLabel.stringValue = "正在\(actionName)…"
+        rebuildQuickActionButtons()
+        setState(.loading)
+        if panel.isVisible {
+            refit()
+        } else {
+            present(near: NSEvent.mouseLocation)
+        }
+    }
+
+    /// Quick action result: single text block titled with the action name,
+    /// same replace / copy affordances as the grammar result.
+    func showQuickResult(title: String, text: String, replaceEnabled: Bool) {
+        cancelAutoDismiss()
+        correctedLabel.stringValue = ""
+        translationCaption.stringValue = title
+        translationLabel.stringValue = text
+        replaceText = text
+        replaceButton.isEnabled = replaceEnabled && !text.isEmpty
+        replaceButton.toolTip = replaceEnabled ? nil : "需要辅助功能权限才能替换原文"
+        if !text.isEmpty {
+            // Auto-copy parity with showResult (B3): result ready to paste.
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            copyButton.title = "已复制"
+        } else {
+            copyButton.title = "复制"
+        }
+        setState(.result)
+        rebuildQuickActionButtons()
         refit()
     }
 
@@ -157,6 +210,8 @@ final class ResultPanelController: NSObject {
 
         let loadingRow = NSStackView(views: [spinner, statusLabel])
         loadingRow.spacing = 8
+        actionsRow.orientation = .horizontal
+        actionsRow.spacing = 8
         let buttonsRow = NSStackView(views: [replaceButton, copyButton, closeButton])
         buttonsRow.spacing = 12
 
@@ -166,7 +221,37 @@ final class ResultPanelController: NSObject {
         stack.addArrangedSubview(correctedLabel)
         stack.addArrangedSubview(translationCaption)
         stack.addArrangedSubview(translationLabel)
+        stack.addArrangedSubview(actionsRow)
         stack.addArrangedSubview(buttonsRow)
+    }
+
+    /// Rebuilds the quick-action chips from `quickActions` plus the trailing
+    /// QR chip (always present — generation needs no AI provider). Called on
+    /// every result state so edits in Settings apply to the next show.
+    private func rebuildQuickActionButtons() {
+        actionsRow.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        for (index, action) in quickActions.enumerated() {
+            let button = NSButton(title: action.name, target: self,
+                                  action: #selector(quickActionClicked(_:)))
+            button.tag = index
+            button.bezelStyle = .rounded
+            button.controlSize = .small
+            actionsRow.addArrangedSubview(button)
+        }
+        let qrButton = NSButton(title: "二维码", target: self,
+                                action: #selector(qrChipClicked))
+        qrButton.bezelStyle = .rounded
+        qrButton.controlSize = .small
+        actionsRow.addArrangedSubview(qrButton)
+    }
+
+    @objc private func quickActionClicked(_ sender: NSButton) {
+        guard quickActions.indices.contains(sender.tag) else { return }
+        onQuickAction?(quickActions[sender.tag])
+    }
+
+    @objc private func qrChipClicked() {
+        onGenerateQR?()
     }
 
     private func configureActionButton(_ button: NSButton, action: Selector) {
@@ -185,6 +270,9 @@ final class ResultPanelController: NSObject {
         correctedLabel.isHidden = state != .result || correctedLabel.stringValue.isEmpty
         translationCaption.isHidden = state != .result
         translationLabel.isHidden = state != .result
+        // Chips stay visible in loading AND result states (only errors hide
+        // them) — the panel must show its action options immediately.
+        actionsRow.isHidden = state == .error
         buttons?.isHidden = state == .loading
     }
 

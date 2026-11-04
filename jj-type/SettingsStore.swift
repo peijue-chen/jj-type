@@ -34,11 +34,17 @@ final class SettingsStore {
         static let hotkeyCorrect = "jjtype.hotkey.correct"
         static let hotkeyCapture = "jjtype.hotkey.capture"
         static let hotkeyLauncher = "jjtype.hotkey.launcher"
+        static let hotkeyClipboard = "jjtype.hotkey.clipboard"
+        static let hotkeyColorPicker = "jjtype.hotkey.colorPicker"
+        static let hotkeyQRCode = "jjtype.hotkey.qrCode"
+        static let colorHistory = "jjtype.colorPicker.history"
         static let captureSaveDirectory = "jjtype.capture.saveDirectory"
         static let captureFormat = "jjtype.capture.format"
         static let accessibilityGuided = "jjtype.guided.accessibility"
         static let launchItems = "jjtype.launchItems"
         static let preferredTerminal = "jjtype.terminal.preferred"
+        static let aiActions = "jjtype.aiActions"
+        static let selectionBar = "jjtype.selectionBar.enabled"
     }
 
     /// Fired whenever the provider list or active provider changes (menu rebuild).
@@ -53,6 +59,8 @@ final class SettingsStore {
     private(set) var providers: [ProviderConfig]
     private(set) var activeProviderId: UUID?
     private(set) var launchItems: [LaunchItem]
+    /// User-defined AI quick actions (shown after the built-ins).
+    private(set) var aiActions: [QuickAction]
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -73,6 +81,38 @@ final class SettingsStore {
         } else {
             launchItems = []
         }
+        if let data = defaults.data(forKey: Key.aiActions),
+           let decoded = try? JSONDecoder().decode([QuickAction].self, from: data) {
+            aiActions = decoded
+        } else {
+            aiActions = []
+        }
+        seedBuiltInActions()
+    }
+
+    /// The built-ins (翻译 / 润色 / 改写) live IN the persisted list so their
+    /// prompts are user-editable; missing ones (first run OR upgrade from a
+    /// custom-only era) are inserted at the front. Edits are never overwritten
+    /// — seeding only fills ids that are absent.
+    private func seedBuiltInActions() {
+        let known = Set(aiActions.map(\.id))
+        var missing = QuickActionCatalog.builtIns.filter { !known.contains($0.id) }
+        guard !missing.isEmpty else { return }
+        missing.reverse()
+        for builtIn in missing {
+            aiActions.insert(builtIn, at: 0)
+        }
+        persistAIActions()
+    }
+
+    /// PopClip-style selection bar (utils-7). Defaults ON.
+    var selectionBarEnabled: Bool {
+        get {
+            defaults.object(forKey: Key.selectionBar) == nil
+                ? true
+                : defaults.bool(forKey: Key.selectionBar)
+        }
+        set { defaults.set(newValue, forKey: Key.selectionBar) }
     }
 
     var activeProvider: ProviderConfig? {
@@ -97,6 +137,33 @@ final class SettingsStore {
     var launcherHotkey: Hotkey {
         get { hotkey(forKey: Key.hotkeyLauncher) ?? .defaultLauncher }
         set { saveHotkey(newValue, forKey: Key.hotkeyLauncher); onHotkeyChanged?() }
+    }
+
+    var clipboardHotkey: Hotkey {
+        get { hotkey(forKey: Key.hotkeyClipboard) ?? .defaultClipboardHistory }
+        set { saveHotkey(newValue, forKey: Key.hotkeyClipboard); onHotkeyChanged?() }
+    }
+
+    var colorPickerHotkey: Hotkey {
+        get { hotkey(forKey: Key.hotkeyColorPicker) ?? .defaultColorPicker }
+        set { saveHotkey(newValue, forKey: Key.hotkeyColorPicker); onHotkeyChanged?() }
+    }
+
+    var qrCodeHotkey: Hotkey {
+        get { hotkey(forKey: Key.hotkeyQRCode) ?? .defaultQRCode }
+        set { saveHotkey(newValue, forKey: Key.hotkeyQRCode); onHotkeyChanged?() }
+    }
+
+    /// Recent picked colors (as copied strings), newest first, capped at 12.
+    var colorHistory: [String] {
+        get { defaults.stringArray(forKey: Key.colorHistory) ?? [] }
+        set { defaults.set(Array(newValue.prefix(12)), forKey: Key.colorHistory) }
+    }
+
+    func recordColorHistory(_ value: String) {
+        var history = colorHistory.filter { $0 != value }
+        history.insert(value, at: 0)
+        colorHistory = history
     }
 
     // MARK: - Screenshot settings
@@ -206,6 +273,37 @@ final class SettingsStore {
         launchItems.removeAll { $0.id == id }
         guard launchItems.count != before else { return }
         persistLaunchItems()
+    }
+
+    // MARK: - AI quick actions
+
+    /// Custom quick actions; the panel re-reads them on every show, so no
+    /// change callback is needed.
+    func addAIAction(_ action: QuickAction) {
+        aiActions.append(action)
+        persistAIActions()
+    }
+
+    func updateAIAction(_ action: QuickAction) {
+        guard let index = aiActions.firstIndex(where: { $0.id == action.id }) else { return }
+        guard aiActions[index] != action else { return }
+        aiActions[index] = action
+        persistAIActions()
+    }
+
+    func deleteAIAction(id: UUID) {
+        // Built-ins are editable but never deletable.
+        guard !QuickActionCatalog.builtInIds.contains(id) else { return }
+        let before = aiActions.count
+        aiActions.removeAll { $0.id == id }
+        guard aiActions.count != before else { return }
+        persistAIActions()
+    }
+
+    private func persistAIActions() {
+        if let data = try? JSONEncoder().encode(aiActions) {
+            defaults.set(data, forKey: Key.aiActions)
+        }
     }
 
     // MARK: - Finder toolbar terminal

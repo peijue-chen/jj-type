@@ -38,6 +38,8 @@ private enum LastTranslation {
 
 final class TranslationWindowController: NSWindowController {
     var onTranslate: ((String) -> Void)?
+    /// QR generation for the typed input (utils-5).
+    var onGenerateQR: ((String) -> Void)?
 
     /// Explicit frame persistence (It13 fix-2): NSWindow autosave alone is
     /// clobbered on the recreate path (contentViewController assignment resizes
@@ -48,6 +50,7 @@ final class TranslationWindowController: NSWindowController {
     private let inputTextView = TranslationInputTextView()
     private let translateButton = NSButton(title: "翻译", target: nil, action: nil)
     private let clearButton = NSButton(title: "清空", target: nil, action: nil)
+    private let qrButton = NSButton(title: "二维码", target: nil, action: nil)
     private let spinner = NSProgressIndicator()
     private let statusLabel = NSTextField(labelWithString: "")
     private let resultTextView = NSTextView()
@@ -213,6 +216,10 @@ final class TranslationWindowController: NSWindowController {
         clearButton.action = #selector(clearClicked)
         clearButton.bezelStyle = .rounded
 
+        qrButton.target = self
+        qrButton.action = #selector(qrClicked)
+        qrButton.bezelStyle = .rounded
+
         spinner.style = .spinning
         spinner.controlSize = .small
         spinner.isHidden = true
@@ -232,7 +239,8 @@ final class TranslationWindowController: NSWindowController {
         resultScroll.borderType = .bezelBorder
         resultScroll.translatesAutoresizingMaskIntoConstraints = false
 
-        let buttonsRow = NSStackView(views: [translateButton, clearButton, spinner, statusLabel])
+        let buttonsRow = NSStackView(views: [translateButton, clearButton, qrButton,
+                                             spinner, statusLabel])
         buttonsRow.spacing = 12
         buttonsRow.alignment = .centerY
 
@@ -266,6 +274,17 @@ final class TranslationWindowController: NSWindowController {
         setStatus("", color: .secondaryLabelColor, fades: false)
         LastTranslation.clear()
         window?.makeFirstResponder(inputTextView)
+    }
+
+    /// Generates a QR code for the current input (utils-5); the result is
+    /// pinned as a floating image by AppDelegate.
+    @objc private func qrClicked() {
+        let text = inputTextView.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            setStatus("请先输入要生成二维码的内容", color: .systemRed, fades: true)
+            return
+        }
+        onGenerateQR?(text)
     }
 
     // MARK: - Private

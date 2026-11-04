@@ -170,7 +170,37 @@ enum PromptBuilder {
         return results
     }
 
-    private static func stripFences(_ text: String) -> String {
+    /// Quick-action reply hardening: weak models wrap the plain answer in JSON
+    /// ("{"response": "…"}", "{"rewritten_text": "…"}", or even
+    /// "{"<the answer>": ""}") — sometimes with prose around it. Extraction
+    /// rules (deliberately conservative, so polishing a JSON code snippet is
+    /// NOT mangled): only SINGLE-entry objects of string values are unwrapped
+    /// — non-empty value wins; all-empty values fall back to the key (the
+    /// "answer in the key" shape). Embedded objects are scanned LAST-wins,
+    /// same rationale as the grammar parser. Everything else returns the
+    /// cleaned text unchanged.
+    static func extractPlainText(_ text: String) -> String {
+        let cleaned = stripThinkingTags(stripFences(text))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let value = plainValue(fromJSONObject: cleaned) { return value }
+        for candidate in jsonObjectSubstrings(in: cleaned).reversed() {
+            if let value = plainValue(fromJSONObject: candidate) { return value }
+        }
+        return cleaned
+    }
+
+    /// Unwraps a SINGLE-entry string-valued JSON object; nil = not that shape.
+    private static func plainValue(fromJSONObject candidate: String) -> String? {
+        guard let data = candidate.data(using: .utf8),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: String],
+              object.count == 1 else { return nil }
+        if let value = object.values.first, !value.isEmpty { return value }
+        if let key = object.keys.first, !key.isEmpty { return key }
+        return nil
+    }
+
+    /// Strips ``` fences — also used by the quick-action result path.
+    static func stripFences(_ text: String) -> String {
         text
             .replacingOccurrences(of: "```json", with: "")
             .replacingOccurrences(of: "```", with: "")

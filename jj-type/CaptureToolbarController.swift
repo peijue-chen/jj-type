@@ -22,6 +22,7 @@ final class CaptureToolbarController {
         case close
         case recognize
         case pin
+        case qr
     }
 
     var onAction: ((Action) -> Void)?
@@ -216,6 +217,9 @@ final class CaptureToolbarController {
         toolRow.addArrangedSubview(makeIconButton(symbol: "text.viewfinder",
                                                   tooltip: "识别文字 — OCR 后复制到剪贴板",
                                                   action: #selector(recognizeClicked)))
+        toolRow.addArrangedSubview(makeIconButton(symbol: "qrcode",
+                                                  tooltip: "识别二维码 — 解析图中二维码并复制",
+                                                  action: #selector(qrClicked)))
         toolRow.addArrangedSubview(makeIconButton(symbol: "pin",
                                                   tooltip: "钉住 — 贴到屏幕上常驻",
                                                   action: #selector(pinClicked)))
@@ -552,6 +556,10 @@ final class CaptureToolbarController {
 
     @objc private func recognizeClicked() {
         onAction?(.recognize)
+    }
+
+    @objc private func qrClicked() {
+        onAction?(.qr)
     }
 
     @objc private func pinClicked() {

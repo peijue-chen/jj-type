@@ -22,17 +22,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let textCapture = TextCaptureService()
     private let aiClient = AIClient()
     private let captureOverlay = CaptureOverlayController()
+    private let keepAwake = KeepAwakeService()
 
     private var resultPanel: ResultPanelController?
     private var translationWindow: TranslationWindowController?
     private var launcherWindow: LauncherWindowController?
     private var settingsWindow: SettingsWindowController?
+    private var clipboardPanel: ClipboardHistoryPanelController?
+    private var qrWindow: QRWindowController?
     private var inFlightTask: Task<Void, Never>?
+    /// Source text of the last successful ⌥+E capture — the input for the
+    /// result panel's AI quick actions.
+    private var lastCapturedSourceText: String?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSLog("[JJType] didFinishLaunching frontmost=%@",
               NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "nil")
         resultPanel = ResultPanelController()
+        resultPanel?.onQuickAction = { [weak self] action in
+            self?.runQuickAction(action)
+        }
+        resultPanel?.onGenerateQR = { [weak self] in
+            self?.generateQRFromSelection()
+        }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         configureStatusIcon()
@@ -54,6 +66,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.reregisterHotkeys()
             }
         }
+        // Keep-awake: one callback drives both the menu section and the status
+        // icon (active state swaps the symbol; timed state counts down).
+        keepAwake.onChanged = { [weak self] in
+            self?.refreshKeepAwakeUI()
+        }
+        // Clipboard recording runs for the whole session; the panel reads the
+        // current entries each time it opens.
+        ClipboardHistoryService.shared.start()
+
+        // PopClip-style selection bar (utils-7): appears on drag-selection.
+        let selectionBar = SelectionActionBarController.shared
+        selectionBar.actionsProvider = { [weak self] in
+            self?.settingsStore.aiActions ?? []
+        }
+        selectionBar.onCopy = { text in
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.setString(text, forType: .string)
+            CaptureToast.shared.show("已复制", symbol: "doc.on.doc")
+        }
+        selectionBar.onQuickAction = { [weak self] action, text in
+            self?.lastCapturedSourceText = text
+            self?.runQuickAction(action)
+        }
+        selectionBar.onGenerateQR = { [weak self] text in
+            self?.generateAndPinQR(text)
+        }
+        if settingsStore.selectionBarEnabled {
+            // The bar itself needs no grant (global MOUSE monitors are free),
+            // but reading the selection via AX does — surface the reason
+            // instead of failing silently when the grant is missing.
+            selectionBar.setEnabled(true)
+            if !AccessibilityPermission.isGranted {
+                requestAccessibilityIfNeeded()
+            }
+        }
 
         hotkeyManager.onTranslate = { [weak self] in
             MainActor.assumeIsolated { self?.runTranslationWindowFlow() }
@@ -66,6 +114,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         hotkeyManager.onLauncher = { [weak self] in
             MainActor.assumeIsolated { self?.toggleLauncher() }
+        }
+        hotkeyManager.onClipboardHistory = { [weak self] in
+            MainActor.assumeIsolated { self?.toggleClipboardHistory() }
+        }
+        hotkeyManager.onColorPicker = { [weak self] in
+            MainActor.assumeIsolated { self?.runColorPickerFlow() }
+        }
+        hotkeyManager.onQRCode = { [weak self] in
+            MainActor.assumeIsolated { self?.toggleQRWindow() }
         }
         hotkeyManager.onLaunchItem = { [weak self] slot in
             MainActor.assumeIsolated { self?.openLaunchItem(slot: slot) }
@@ -122,6 +179,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         // Carbon hotkeys are released with the process; nothing to clean up manually.
+        // caffeinate children are NOT killed with their parent — stop them here.
+        keepAwake.shutdown()
     }
 
     // MARK: - Main menu (Edit shortcuts for text fields)
@@ -151,9 +210,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// text fallback: nil symbol OR zero-size image → visible "文A" title, always.
     private func configureStatusIcon() {
         guard let button = statusItem?.button else { return }
-        let symbol = NSImage(systemSymbolName: "translate", accessibilityDescription: "JJType")
-            ?? NSImage(systemSymbolName: "character.bubble", accessibilityDescription: "JJType")
-            ?? NSImage(systemSymbolName: "character.textbox", accessibilityDescription: "JJType")
+        // While keep-awake is on, the icon swaps to a coffee cup — a
+        // glance-level "this Mac will not sleep" indicator that needs no menu.
+        let symbol: NSImage?
+        if keepAwake.isActive {
+            symbol = NSImage(systemSymbolName: "cup.and.saucer.fill",
+                             accessibilityDescription: "JJType 防休眠")
+                ?? NSImage(systemSymbolName: "cup.and.saucer",
+                           accessibilityDescription: "JJType 防休眠")
+        } else {
+            symbol = NSImage(systemSymbolName: "translate", accessibilityDescription: "JJType")
+                ?? NSImage(systemSymbolName: "character.bubble", accessibilityDescription: "JJType")
+                ?? NSImage(systemSymbolName: "character.textbox", accessibilityDescription: "JJType")
+        }
         if let symbol, symbol.size.width > 0, symbol.size.height > 0 {
             symbol.isTemplate = true
             symbol.size = NSSize(width: 18, height: 18)
@@ -190,6 +259,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                      action: #selector(openLauncherMenu), keyEquivalent: "").target = self
         menu.addItem(withTitle: "截图  \(settingsStore.captureHotkey.displayText)",
                      action: #selector(startCapture), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "剪贴板历史  \(settingsStore.clipboardHotkey.displayText)",
+                     action: #selector(openClipboardHistory), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "二维码  \(settingsStore.qrCodeHotkey.displayText)",
+                     action: #selector(openQRWindow), keyEquivalent: "").target = self
+        menu.addItem(keepAwakeMenuItem())
 
         if !settingsStore.launchItems.isEmpty {
             let parent = NSMenuItem(title: "快捷启动", action: nil, keyEquivalent: "")
@@ -263,6 +337,137 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // MARK: - Keep awake
+
+    /// Keep-awake state changed (or the minute tick fired): the menu section
+    /// and the status icon both reflect the current state.
+    private func refreshKeepAwakeUI() {
+        configureStatusIcon()
+        rebuildStatusMenu()
+    }
+
+    /// 「防休眠」submenu: indefinite toggle, three timed presets (checkmark on
+    /// the running mode), and an explicit stop entry. The parent title counts
+    /// down while a timed session is active.
+    private func keepAwakeMenuItem() -> NSMenuItem {
+        let title: String
+        if keepAwake.isActive {
+            if keepAwake.sessionDuration == nil {
+                title = "防休眠 · 已开启"
+            } else if let minutes = keepAwake.remainingMinutes {
+                title = "防休眠 · 剩余 \(minutes) 分钟"
+            } else {
+                title = "防休眠 · 已开启"
+            }
+        } else {
+            title = "防休眠"
+        }
+        let parent = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        let presets: [(String, TimeInterval?)] = [
+            ("开启（直到手动关闭）", nil),
+            ("30 分钟", 30 * 60),
+            ("1 小时", 60 * 60),
+            ("2 小时", 2 * 60 * 60),
+        ]
+        for (presetTitle, seconds) in presets {
+            let item = NSMenuItem(title: presetTitle, action: #selector(startKeepAwake(_:)),
+                                  keyEquivalent: "")
+            item.target = self
+            // nil representedObject = the indefinite preset.
+            if let seconds {
+                item.representedObject = seconds
+            }
+            item.state = (keepAwake.isActive && keepAwake.sessionDuration == seconds) ? .on : .off
+            submenu.addItem(item)
+        }
+        submenu.addItem(.separator())
+        let stop = NSMenuItem(title: "关闭防休眠", action: #selector(stopKeepAwake),
+                              keyEquivalent: "")
+        stop.target = self
+        stop.isEnabled = keepAwake.isActive
+        submenu.addItem(stop)
+        parent.submenu = submenu
+        return parent
+    }
+
+    /// Menu action: (re)starts keep-awake with the chosen preset. A start
+    /// failure must never be silent (feedback rule) — it surfaces as an alert.
+    @objc private func startKeepAwake(_ sender: NSMenuItem) {
+        let duration = sender.representedObject as? TimeInterval
+        do {
+            try keepAwake.enable(for: duration)
+        } catch {
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = "无法开启防休眠"
+            alert.informativeText = (error as? LocalizedError)?.errorDescription
+                ?? error.localizedDescription
+            alert.runModal()
+        }
+    }
+
+    @objc private func stopKeepAwake() {
+        keepAwake.disable()
+    }
+
+    // MARK: - Clipboard history
+
+    /// Clipboard hotkey: toggles, so pressing it twice dismisses the panel.
+    private func toggleClipboardHistory() {
+        if let panel = clipboardPanel, panel.isVisible {
+            panel.dismiss()
+        } else {
+            clipboardHistoryPanelIfNeeded().present(entries: ClipboardHistoryService.shared.entries)
+        }
+    }
+
+    @objc private func openClipboardHistory() {
+        clipboardHistoryPanelIfNeeded().present(entries: ClipboardHistoryService.shared.entries)
+    }
+
+    private func clipboardHistoryPanelIfNeeded() -> ClipboardHistoryPanelController {
+        if let clipboardPanel { return clipboardPanel }
+        let controller = ClipboardHistoryPanelController()
+        clipboardPanel = controller
+        return controller
+    }
+
+    // MARK: - QR window (utils-6)
+
+    /// ⌥Q toggles the dedicated QR window (generate / decode).
+    private func toggleQRWindow() {
+        if let qrWindow, qrWindow.window?.isVisible == true {
+            qrWindow.window?.orderOut(nil)
+        } else {
+            qrWindowIfNeeded().present()
+        }
+    }
+
+    @objc private func openQRWindow() {
+        qrWindowIfNeeded().present()
+    }
+
+    private func qrWindowIfNeeded() -> QRWindowController {
+        if let qrWindow { return qrWindow }
+        let controller = QRWindowController()
+        qrWindow = controller
+        return controller
+    }
+
+    // MARK: - Screen color picker
+
+    /// ⌥P flow: the loupe samples pixels via CGDisplayCreateImage, which needs
+    /// the same Screen Recording grant as the screenshot flow.
+    private func runColorPickerFlow() {
+        guard ScreenCapturePermission.isGranted else {
+            ScreenCapturePermission.request()
+            ScreenCaptureGuideWindowController.shared.showIfNeeded(force: true)
+            return
+        }
+        EyedropperController.shared.begin()
+    }
+
     // MARK: - Pipeline
 
     /// ⌥+E flow: capture → floating result panel (unchanged behavior).
@@ -283,6 +488,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let mouseLocation = NSEvent.mouseLocation
         guard let panel = resultPanel else { return }
+        // The floating selection bar must not hover over the result panel.
+        SelectionActionBarController.shared.dismiss()
+        // Fresh action chips on every show, so Settings edits apply live
+        // (the persisted list includes the seeded built-ins).
+        panel.quickActions = settingsStore.aiActions
         panel.showLoading(near: mouseLocation, mode: mode) { [weak self] in
             self?.inFlightTask?.cancel()
         }
@@ -298,6 +508,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 panel.showError(error.localizedDescription)
                 return
             case .success(let text):
+                lastCapturedSourceText = text
                 let task = LanguageRouter.makeTask(text: text)
                 let systemPrompt = PromptBuilder.systemPrompt(mode: mode, language: task.language)
                 let userPrompt = PromptBuilder.userPrompt(text: text, mode: mode)
@@ -361,6 +572,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             self.translateTypedText(text)
         }
+        window.onGenerateQR = { [weak self] text in
+            self?.generateAndPinQR(text)
+        }
         return window
     }
 
@@ -406,6 +620,90 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 window.showError(Self.errorMessage(for: error))
             }
         }
+    }
+
+    // MARK: - AI quick actions
+
+    /// System prompt for quick actions: plain-text output, no JSON contract.
+    private static let quickActionSystemPrompt = """
+    You are a desktop text assistant. Follow the user's instruction exactly and \
+    output ONLY the resulting text — no explanations, no markdown fences, no JSON, \
+    no thinking.
+    """
+
+    /// Runs a quick action (翻译 / 润色 / 改写 / custom) against the text of the
+    /// last capture and renders the raw reply in the same result panel.
+    private func runQuickAction(_ action: QuickAction) {
+        guard let source = lastCapturedSourceText, !source.isEmpty,
+              let panel = resultPanel else { return }
+        // Selection-bar path: the bar dismisses itself, but the ⌥E-panel chip
+        // path leaves it hanging over the result — close it here too, and
+        // refresh the chips so a Settings edit is reflected immediately.
+        SelectionActionBarController.shared.dismiss()
+        panel.quickActions = settingsStore.aiActions
+        guard let provider = settingsStore.activeProvider else {
+            panel.showError("尚未选择当前使用的 AI 服务，请在菜单栏图标或设置… 中选择")
+            return
+        }
+
+        inFlightTask?.cancel()
+        panel.showQuickLoading(actionName: action.name)
+        inFlightTask = Task { [aiClient, panel] in
+            do {
+                guard let apiKey = KeychainStore.loadAPIKey(for: provider.id), !apiKey.isEmpty else {
+                    panel.showError("该服务未配置 API Key，请在设置中填写")
+                    return
+                }
+                let reply = try await aiClient.complete(provider: provider, apiKey: apiKey,
+                                                        systemPrompt: Self.quickActionSystemPrompt,
+                                                        userPrompt: action.resolvedPrompt(for: source))
+                guard !Task.isCancelled else { return }
+                // JSON-wrapped replies from weak models are unwrapped here.
+                let cleaned = PromptBuilder.extractPlainText(reply)
+                if cleaned.isEmpty {
+                    panel.showError("AI 返回为空（可能被截断），请重试或更换模型")
+                } else {
+                    panel.showQuickResult(title: action.name, text: cleaned,
+                                          replaceEnabled: AccessibilityPermission.isGranted)
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                panel.showError(Self.errorMessage(for: error))
+            }
+        }
+    }
+
+    // MARK: - QR generation
+
+    /// Generates a QR for `text` and pins it as a floating image (drag to
+    /// move; right-click to copy / save — same affordances as pinned shots).
+    private func generateAndPinQR(_ text: String) {
+        do {
+            let image = try QRService.generateQR(for: text)
+            let pointSize = CGSize(width: 240, height: 240)
+            // Centered on the screen the pointer is on.
+            let pointer = NSEvent.mouseLocation
+            let screen = NSScreen.screens.first { $0.frame.contains(pointer) } ?? NSScreen.main
+            let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 800, height: 600)
+            let origin = CGPoint(x: visible.midX - pointSize.width / 2,
+                                 y: visible.midY - pointSize.height / 2)
+            PinWindowController.show(image: image, pointSize: pointSize, at: origin)
+            CaptureToast.shared.show("二维码已生成 · 拖动移动，右键可复制 / 保存",
+                                     symbol: "qrcode", duration: 2.5)
+        } catch {
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = "生成二维码失败"
+            alert.informativeText = (error as? LocalizedError)?.errorDescription
+                ?? error.localizedDescription
+            alert.runModal()
+        }
+    }
+
+    /// Result panel's QR chip: code for the last captured selection.
+    private func generateQRFromSelection() {
+        guard let text = lastCapturedSourceText, !text.isEmpty else { return }
+        generateAndPinQR(text)
     }
 
     /// Uniform Chinese error message for pipeline failures.
@@ -611,12 +909,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             HotkeyManager.HotkeyID.correctAndTranslate.rawValue: settingsStore.correctHotkey,
             HotkeyManager.HotkeyID.capture.rawValue: settingsStore.captureHotkey,
             HotkeyManager.HotkeyID.launcher.rawValue: settingsStore.launcherHotkey,
+            HotkeyManager.HotkeyID.clipboardHistory.rawValue: settingsStore.clipboardHotkey,
+            HotkeyManager.HotkeyID.colorPicker.rawValue: settingsStore.colorPickerHotkey,
+            HotkeyManager.HotkeyID.qrCode.rawValue: settingsStore.qrCodeHotkey,
         ]
         var names: [UInt32: String] = [
             HotkeyManager.HotkeyID.translate.rawValue: "翻译",
             HotkeyManager.HotkeyID.correctAndTranslate.rawValue: "纠正+翻译",
             HotkeyManager.HotkeyID.capture.rawValue: "截图",
             HotkeyManager.HotkeyID.launcher.rawValue: "启动器",
+            HotkeyManager.HotkeyID.clipboardHistory.rawValue: "剪贴板历史",
+            HotkeyManager.HotkeyID.colorPicker.rawValue: "取色",
+            HotkeyManager.HotkeyID.qrCode.rawValue: "二维码",
         ]
         for item in settingsStore.launchItems {
             guard let hotkey = item.hotkey else { continue }

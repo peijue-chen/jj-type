@@ -20,6 +20,12 @@ struct Hotkey: Codable, Equatable {
     /// Launcher: ⌥O ("open"). Deliberately NOT ⌥Space, which is Alfred's own
     /// default — the two apps are expected to live side by side.
     static let defaultLauncher = Hotkey(keyCode: UInt32(kVK_ANSI_O), modifierFlags: NSEvent.ModifierFlags.option.rawValue)
+    /// Clipboard history: ⌥V — the panel pastes back what you pick.
+    static let defaultClipboardHistory = Hotkey(keyCode: UInt32(kVK_ANSI_V), modifierFlags: NSEvent.ModifierFlags.option.rawValue)
+    /// Screen color picker: ⌥P.
+    static let defaultColorPicker = Hotkey(keyCode: UInt32(kVK_ANSI_P), modifierFlags: NSEvent.ModifierFlags.option.rawValue)
+    /// Dedicated QR window: ⌥Q.
+    static let defaultQRCode = Hotkey(keyCode: UInt32(kVK_ANSI_Q), modifierFlags: NSEvent.ModifierFlags.option.rawValue)
 
     var carbonModifiers: UInt32 {
         var carbon: UInt32 = 0
@@ -88,6 +94,9 @@ final class HotkeyManager {
         case correctAndTranslate = 2
         case capture = 3
         case launcher = 4
+        case clipboardHistory = 5
+        case colorPicker = 6
+        case qrCode = 7
     }
 
     /// Dynamic ids (launch items) start here so they can never collide with the
@@ -101,6 +110,9 @@ final class HotkeyManager {
     var onCorrectAndTranslate: (() -> Void)?
     var onCapture: (() -> Void)?
     var onLauncher: (() -> Void)?
+    var onClipboardHistory: (() -> Void)?
+    var onColorPicker: (() -> Void)?
+    var onQRCode: (() -> Void)?
     /// Fires with the launch item's own hotkey slot (see `launchItemSlotRange`).
     var onLaunchItem: ((UInt32) -> Void)?
 
@@ -179,6 +191,12 @@ final class HotkeyManager {
                     onCapture?()
                 case .launcher:
                     onLauncher?()
+                case .clipboardHistory:
+                    onClipboardHistory?()
+                case .colorPicker:
+                    onColorPicker?()
+                case .qrCode:
+                    onQRCode?()
                 }
             } else {
                 onLaunchItem?(id)
