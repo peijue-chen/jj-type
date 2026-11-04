@@ -244,6 +244,19 @@ final class ClipboardHistoryService {
 
     // MARK: - Management
 
+    /// ⌥⌫ in the panel (utils-8): removes one entry, persists, and deletes
+    /// its image file (if any) off the main thread.
+    func remove(_ entry: ClipboardEntry) {
+        let before = entries.count
+        entries.removeAll { $0.id == entry.id }
+        guard entries.count != before else { return }
+        if case .image(let file, _, _) = entry.kind {
+            thumbnailCache.removeObject(forKey: directory.appendingPathComponent(file) as NSURL)
+        }
+        scheduleSave()
+        deleteImageFiles(of: [entry])
+    }
+
     /// Settings → 工具 → 清空. Removes every entry and every stored image.
     func clearAll() {
         entries.removeAll()

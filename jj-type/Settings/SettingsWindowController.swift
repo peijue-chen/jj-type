@@ -98,6 +98,7 @@ final class SettingsWindowController: NSWindowController {
     private var clipboardRecorder: HotkeyRecorderView?
     private var colorPickerRecorder: HotkeyRecorderView?
     private var qrCodeRecorder: HotkeyRecorderView?
+    private var devToolRecorder: HotkeyRecorderView?
 
     // MARK: - Launch page
 
@@ -415,6 +416,7 @@ final class SettingsWindowController: NSWindowController {
             ("剪贴板历史", store.clipboardHotkey, .clipboardHistory),
             ("取色", store.colorPickerHotkey, .colorPicker),
             ("二维码", store.qrCodeHotkey, .qrCode),
+            ("开发工具", store.devToolHotkey, .devTool),
         ]
         let card = Theme.card()
         card.content.addArrangedSubview(makeSectionHeader("功能快捷键"))
@@ -432,6 +434,7 @@ final class SettingsWindowController: NSWindowController {
             case .clipboardHistory: clipboardRecorder = recorder
             case .colorPicker: colorPickerRecorder = recorder
             case .qrCode: qrCodeRecorder = recorder
+            case .devTool: devToolRecorder = recorder
             }
             if index > 0 { card.addSeparator() }
             card.content.addArrangedSubview(recorder)
@@ -1176,6 +1179,7 @@ final class SettingsWindowController: NSWindowController {
         case .clipboardHistory: return store.clipboardHotkey
         case .colorPicker: return store.colorPickerHotkey
         case .qrCode: return store.qrCodeHotkey
+        case .devTool: return store.devToolHotkey
         }
     }
 
@@ -1190,6 +1194,7 @@ final class SettingsWindowController: NSWindowController {
         case .clipboardHistory: store.clipboardHotkey = hotkey
         case .colorPicker: store.colorPickerHotkey = hotkey
         case .qrCode: store.qrCodeHotkey = hotkey
+        case .devTool: store.devToolHotkey = hotkey
         }
     }
 
@@ -1202,6 +1207,7 @@ final class SettingsWindowController: NSWindowController {
         case .clipboardHistory: return clipboardRecorder
         case .colorPicker: return colorPickerRecorder
         case .qrCode: return qrCodeRecorder
+        case .devTool: return devToolRecorder
         }
     }
 
@@ -1400,6 +1406,7 @@ final class SettingsWindowController: NSWindowController {
         if store.clipboardHotkey == hotkey { return "剪贴板历史" }
         if store.colorPickerHotkey == hotkey { return "取色" }
         if store.qrCodeHotkey == hotkey { return "二维码" }
+        if store.devToolHotkey == hotkey { return "开发工具" }
         return store.launchItems.first { $0.id != id && $0.hotkey == hotkey }?.name
     }
 

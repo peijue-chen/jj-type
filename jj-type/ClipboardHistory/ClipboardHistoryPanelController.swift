@@ -156,7 +156,7 @@ final class ClipboardHistoryPanelController: NSWindowController {
         emptyLabel.alignment = .center
         emptyLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        let footer = NSTextField(labelWithString: "↑↓ 选择 · ⏎ 粘贴到原应用 · ⌘⏎ 仅复制 · esc 关闭")
+        let footer = NSTextField(labelWithString: "↑↓ 选择 · ⏎ 粘贴到原应用 · ⌘⏎ 仅复制 · ⌥⌫ 删除 · esc 关闭")
         footer.font = .systemFont(ofSize: 11)
         footer.textColor = .secondaryLabelColor
         footer.translatesAutoresizingMaskIntoConstraints = false
@@ -353,6 +353,27 @@ final class ClipboardHistoryPanelController: NSWindowController {
         CaptureToast.shared.show("已复制", symbol: "doc.on.doc")
     }
 
+    /// ⌥⌫ path (key monitor, utils-8): delete the selected entry in place —
+    /// the list rebuilds around the deleted index so the next entry slides
+    /// into the selection instead of jumping back to the top.
+    private func removeSelectedEntry() {
+        flushPendingFilterIfNeeded()
+        guard selectedIndex >= 0, selectedIndex < filtered.count else { return }
+        let entry = filtered[selectedIndex]
+        ClipboardHistoryService.shared.remove(entry)
+        if let index = allEntries.firstIndex(where: { $0.id == entry.id }) {
+            allEntries.remove(at: index)
+        }
+        let keptIndex = selectedIndex
+        rebuildRows(immediateResize: false)
+        // Restore a sensible selection: the entry that took the deleted one's
+        // place, clamped for a deleted tail row.
+        if !filtered.isEmpty {
+            selectedIndex = min(keptIndex, filtered.count - 1)
+            applySelection()
+        }
+    }
+
     // MARK: - ⌘⏎ interception
 
     private func installKeyMonitor() {
@@ -365,6 +386,15 @@ final class ClipboardHistoryPanelController: NSWindowController {
                 if event.keyCode == 36,
                    event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command) {
                     self.submitCopyOnly()
+                    return nil
+                }
+                // ⌥⌫ (keyCode 51) = delete the selected entry (utils-8). The
+                // raw-event interception is the ONLY reliable spot — the field
+                // editor turns a bare Delete into plain character editing and
+                // drops the ⌥ from doCommandBy's view of the world.
+                if event.keyCode == 51,
+                   event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.option) {
+                    self.removeSelectedEntry()
                     return nil
                 }
                 return event

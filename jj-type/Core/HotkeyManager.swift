@@ -26,6 +26,8 @@ struct Hotkey: Codable, Equatable {
     static let defaultColorPicker = Hotkey(keyCode: UInt32(kVK_ANSI_P), modifierFlags: NSEvent.ModifierFlags.option.rawValue)
     /// Dedicated QR window: ⌥Q.
     static let defaultQRCode = Hotkey(keyCode: UInt32(kVK_ANSI_Q), modifierFlags: NSEvent.ModifierFlags.option.rawValue)
+    /// Developer tool window: ⌥J ("JSON").
+    static let defaultDevTool = Hotkey(keyCode: UInt32(kVK_ANSI_J), modifierFlags: NSEvent.ModifierFlags.option.rawValue)
 
     var carbonModifiers: UInt32 {
         var carbon: UInt32 = 0
@@ -97,6 +99,7 @@ final class HotkeyManager {
         case clipboardHistory = 5
         case colorPicker = 6
         case qrCode = 7
+        case devTool = 8
     }
 
     /// Dynamic ids (launch items) start here so they can never collide with the
@@ -113,6 +116,7 @@ final class HotkeyManager {
     var onClipboardHistory: (() -> Void)?
     var onColorPicker: (() -> Void)?
     var onQRCode: (() -> Void)?
+    var onDevTool: (() -> Void)?
     /// Fires with the launch item's own hotkey slot (see `launchItemSlotRange`).
     var onLaunchItem: ((UInt32) -> Void)?
 
@@ -197,6 +201,8 @@ final class HotkeyManager {
                     onColorPicker?()
                 case .qrCode:
                     onQRCode?()
+                case .devTool:
+                    onDevTool?()
                 }
             } else {
                 onLaunchItem?(id)

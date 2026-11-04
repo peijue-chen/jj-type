@@ -30,6 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindow: SettingsWindowController?
     private var clipboardPanel: ClipboardHistoryPanelController?
     private var qrWindow: QRWindowController?
+    private var devToolWindow: DevToolWindowController?
     private var inFlightTask: Task<Void, Never>?
     /// Source text of the last successful ⌥+E capture — the input for the
     /// result panel's AI quick actions.
@@ -50,6 +51,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         configureStatusIcon()
 
         rebuildStatusMenu()
+
+        // Register global hotkeys IMMEDIATELY after the status item — a fresh
+        // install (or a moved app) runs slower first-launch steps later in
+        // this method (permission prompts, guides, index load, Finder probe),
+        // and deferring registration made every shortcut feel dead until they
+        // finished. The dispatch callbacks attach a few lines below; a hotkey
+        // pressed in that millisecond window is simply a no-op.
+        reregisterHotkeys()
 
         settingsStore.onProvidersChanged = { [weak self] in
             MainActor.assumeIsolated { self?.rebuildStatusMenu() }
@@ -124,6 +133,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyManager.onQRCode = { [weak self] in
             MainActor.assumeIsolated { self?.toggleQRWindow() }
         }
+        hotkeyManager.onDevTool = { [weak self] in
+            MainActor.assumeIsolated { self?.toggleDevToolWindow() }
+        }
         hotkeyManager.onLaunchItem = { [weak self] slot in
             MainActor.assumeIsolated { self?.openLaunchItem(slot: slot) }
         }
@@ -141,9 +153,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // LSUIElement apps get no main menu — install one with a standard Edit menu
         // so ⌘V/⌘C/⌘X/⌘A/⌘Z work in text fields (B2 fix; the menu itself stays invisible).
         installMainMenu()
-
-        // Explicit startup registration so a hotkey conflict is surfaced, not swallowed (W1).
-        reregisterHotkeys()
 
         if !AccessibilityPermission.isGranted && !settingsStore.accessibilityGuidedShown {
             settingsStore.accessibilityGuidedShown = true
@@ -261,6 +270,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                      action: #selector(openClipboardHistory), keyEquivalent: "").target = self
         menu.addItem(withTitle: "二维码  \(settingsStore.qrCodeHotkey.displayText)",
                      action: #selector(openQRWindow), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "开发工具  \(settingsStore.devToolHotkey.displayText)",
+                     action: #selector(openDevToolWindow), keyEquivalent: "").target = self
         menu.addItem(keepAwakeMenuItem())
 
         if !settingsStore.launchItems.isEmpty {
@@ -428,6 +439,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let clipboardPanel { return clipboardPanel }
         let controller = ClipboardHistoryPanelController()
         clipboardPanel = controller
+        return controller
+    }
+
+    // MARK: - Dev tool window (utils-8)
+
+    /// ⌥J toggles the developer tool window (JSON / Base64 / URI).
+    /// Close ONLY when the window is actually the focused one — if it is
+    /// visible but buried behind other apps' windows, the hotkey must RAISE
+    /// it (floating level + activate), not silently close it.
+    private func toggleDevToolWindow() {
+        if let devToolWindow, devToolWindow.window?.isVisible == true,
+           NSApp.isActive, devToolWindow.window?.isKeyWindow == true {
+            devToolWindow.closeAndRelease()
+        } else {
+            devToolWindowIfNeeded().present()
+        }
+    }
+
+    @objc private func openDevToolWindow() {
+        devToolWindowIfNeeded().present()
+    }
+
+    private func devToolWindowIfNeeded() -> DevToolWindowController {
+        if let devToolWindow { return devToolWindow }
+        let controller = DevToolWindowController()
+        // A formatted JSON tree can be heavy — closing the window drops the
+        // whole controller (window + texts + nodes) so nothing lingers.
+        controller.onClosed = { [weak self] in
+            self?.devToolWindow = nil
+        }
+        devToolWindow = controller
         return controller
     }
 
@@ -910,6 +952,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             HotkeyManager.HotkeyID.clipboardHistory.rawValue: settingsStore.clipboardHotkey,
             HotkeyManager.HotkeyID.colorPicker.rawValue: settingsStore.colorPickerHotkey,
             HotkeyManager.HotkeyID.qrCode.rawValue: settingsStore.qrCodeHotkey,
+            HotkeyManager.HotkeyID.devTool.rawValue: settingsStore.devToolHotkey,
         ]
         var names: [UInt32: String] = [
             HotkeyManager.HotkeyID.translate.rawValue: "翻译",
@@ -919,6 +962,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             HotkeyManager.HotkeyID.clipboardHistory.rawValue: "剪贴板历史",
             HotkeyManager.HotkeyID.colorPicker.rawValue: "取色",
             HotkeyManager.HotkeyID.qrCode.rawValue: "二维码",
+            HotkeyManager.HotkeyID.devTool.rawValue: "开发工具",
         ]
         for item in settingsStore.launchItems {
             guard let hotkey = item.hotkey else { continue }
