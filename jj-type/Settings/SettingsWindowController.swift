@@ -1482,7 +1482,11 @@ extension SettingsWindowController: NSTableViewDataSource, NSTableViewDelegate {
 
 /// One sidebar entry: tinted icon tile + title, highlighted while selected
 /// (accent-tinted rounded fill, re-resolved on appearance changes).
+/// Exposes itself as an accessibility BUTTON so VoiceOver / keyboard /
+/// automation can switch pages (the old segmented control was pressable —
+/// a plain NSView is not, which was an a11y regression).
 final class SettingsSidebarRowView: NSView {
+    private let rowTitle: String
     private let onSelect: () -> Void
     private var isSelected = false {
         didSet { needsDisplay = true }
@@ -1490,6 +1494,7 @@ final class SettingsSidebarRowView: NSView {
 
     init(title: String, symbol: String, colors: [NSColor],
          onSelect: @escaping () -> Void) {
+        self.rowTitle = title
         self.onSelect = onSelect
         super.init(frame: NSRect(x: 0, y: 0, width: 180, height: 36))
         translatesAutoresizingMaskIntoConstraints = false
@@ -1522,6 +1527,25 @@ final class SettingsSidebarRowView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         onSelect()
+    }
+
+    // MARK: Accessibility (pressable sidebar entry)
+
+    override func isAccessibilityElement() -> Bool { true }
+
+    override func accessibilityRole() -> NSAccessibility.Role? { .button }
+
+    override func accessibilityLabel() -> String? { rowTitle }
+
+    /// AXTitle too — `name` for UI scripting / System Events, while the label
+    /// covers VoiceOver's description fallback.
+    override func accessibilityTitle() -> String? { rowTitle }
+
+    override func accessibilityValue() -> Any? { isSelected ? "已选中" : nil }
+
+    override func accessibilityPerformPress() -> Bool {
+        onSelect()
+        return true
     }
 
     override var wantsUpdateLayer: Bool { true }
