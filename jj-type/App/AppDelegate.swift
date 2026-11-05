@@ -6,6 +6,7 @@
 //
 
 import AppKit
+import Carbon
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     override init() {
@@ -37,8 +38,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastCapturedSourceText: String?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSLog("[JJType] didFinishLaunching frontmost=%@",
-              NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "nil")
+        FinderTerminal.note("didFinishLaunching frontmost="
+            + (NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "nil"))
         resultPanel = ResultPanelController()
         resultPanel?.onQuickAction = { [weak self] action in
             self?.runQuickAction(action)
@@ -154,6 +155,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // so ⌘V/⌘C/⌘X/⌘A/⌘Z work in text fields (B2 fix; the menu itself stays invisible).
         installMainMenu()
 
+        // Finder toolbar clicks on the running app arrive as a reopen event.
+        NSAppleEventManager.shared().setEventHandler(
+            self,
+            andSelector: #selector(handleReopenEvent(_:withReply:)),
+            forEventClass: AEEventClass(kCoreEventClass),
+            andEventID: AEEventID(kAEReopenApplication))
+
         if !AccessibilityPermission.isGranted && !settingsStore.accessibilityGuidedShown {
             settingsStore.accessibilityGuidedShown = true
             requestAccessibilityIfNeeded()
@@ -175,15 +183,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// opens settings instead (go2shell parity).
     func applicationShouldHandleReopen(_ application: NSApplication,
                                        hasVisibleWindows flag: Bool) -> Bool {
-        NSLog("[JJType] reopen received, visible=%@ option=%@",
-              flag ? "1" : "0", NSEvent.modifierFlags.contains(.option) ? "1" : "0")
+        FinderTerminal.note("reopen (delegate) received visible=\(flag ? 1 : 0)")
+        handleReopen()
+        return true
+    }
+
+    /// A raw `kAEReopenApplication` handler is installed as well: for an
+    /// LSUIElement app with no windows the delegate callback has been
+    /// observed not to arrive at all, and the click then silently does
+    /// nothing. AppKit's own handler stays in place, so the event can be
+    /// delivered twice — FinderTerminal's 0.5 s debounce collapses that.
+    @objc private func handleReopenEvent(_ event: NSAppleEventDescriptor,
+                                         withReply reply: NSAppleEventDescriptor) {
+        FinderTerminal.note("reopen (raw AE) received")
+        handleReopen()
+    }
+
+    private func handleReopen() {
         if NSEvent.modifierFlags.contains(.option) {
             openSettings()
             settingsWindow?.selectTerminalSection()
         } else {
             FinderTerminal.handleLaunch(coldLaunch: false)
         }
-        return true
     }
 
     func applicationWillTerminate(_ notification: Notification) {

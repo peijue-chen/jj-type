@@ -31,6 +31,22 @@ JJType 的所有可见变更都记录在这里。版本号固定三位 `MAJOR.MI
 - **取色器跟随修复**：光标位于本 App 窗口上或个别应用拦截鼠标事件时放大镜不再
   冻结 —— 新增本地 mouseMoved 监视器 + 30fps 光标轮询兜底（仅在位移超过 0.25pt
   时采样，静止零开销）。
+- **「在终端中打开」修复**：Finder 脚本解析失败时不再静默降级到桌面（此前自动化
+  权限缺失会导致每次点击都打开 Desktop）；失败改为 toast 提示 + 记录真实错误码；
+  无 Finder 窗口时仍按 go2shell 惯例打开桌面。
+- **「在终端中打开」根因修复**：`Info.plist` 缺 `NSAppleEventsUsageDescription`，
+  macOS 因此**静默拒绝**所有 Apple Event（-1743）且永不弹授权询问 —— 补上用途说明后
+  首次点击即弹「JJType 想控制 Finder」，允许后功能才真正生效；Finder 脚本里的
+  `try…end try` 不再吞掉 -1743（此前被误判成「没有 Finder 窗口」→ 直接降级桌面）；
+  运行中点击改由原生 `kAEReopenApplication` 事件处理（LSUIElement 无窗口时
+  `applicationShouldHandleReopen` 实测不会回调），0.5 秒去重防双开。
+- **「在终端中打开」不再被双击 App 触发**：在 Finder 里双击 / 选中 JJType.app 时
+  脚本返回的是**包本身**（包也是目录，不走文件→父目录的修正），原先只比对上一级
+  目录会漏掉，导致双击 App 反而开一个终端；现在两种形态都拦掉（路径统一
+  `standardizedFileURL` 归一化，顺带消除 `POSIX path of` 的尾斜杠差异）。
+- **诊断可留痕**：Finder 工具栏链路（GUI 触发、无其他反馈）全过程写入
+  `~/Library/Logs/JJType/finder-terminal.log`（256 KB 自动轮转）—— release 版
+  NSLog 的 stderr 会被丢弃且不进统一日志，出问题时可事后取证。
 
 ## [1.7.0] — 2026-11-04
 

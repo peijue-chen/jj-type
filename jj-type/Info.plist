@@ -16,6 +16,12 @@
 	<string>public.app-category.utilities</string>
 	<key>LSUIElement</key>
 	<true/>
+	<!-- REQUIRED for Automation (Apple Events). Without this key macOS denies
+	     every Apple event for good (errAEEventNotPermitted, -1743) and never
+	     shows the system prompt — which is why the Finder-toolbar "open
+	     terminal here" silently failed on every click. -->
+	<key>NSAppleEventsUsageDescription</key>
+	<string>JJType 需要控制 Finder 以读取当前文件夹（在终端中打开），以及控制 System Events 以执行重启 / 关机 / 注销。</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 </dict>
