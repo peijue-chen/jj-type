@@ -1,0 +1,1 @@
+openwiki code --update --print
