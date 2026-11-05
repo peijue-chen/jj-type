@@ -93,16 +93,25 @@ final class AIClient {
     /// reasoning_content (thinking text is NEVER returned raw). When nothing
     /// valid is recovered and the model was cut by max_tokens, one automatic
     /// retry runs at a doubled budget before a clean error is thrown.
+    ///
+    /// `jsonMode` (default true) forces `response_format: json_object` — the
+    /// contract the {"corrected","translation"} parser needs. Plain-text callers
+    /// (quick actions) MUST pass false: forcing JSON mode onto a "output only
+    /// the text" instruction made long selections come back as truncated or
+    /// multi-key JSON the plain-text extractor could not recover.
     func complete(provider: ProviderConfig, apiKey: String,
-                  systemPrompt: String, userPrompt: String) async throws -> String {
+                  systemPrompt: String, userPrompt: String,
+                  jsonMode: Bool = true) async throws -> String {
         let messages = [Message(role: "system", content: systemPrompt),
                         Message(role: "user", content: userPrompt)]
         var completion = try await attempt(provider: provider, apiKey: apiKey,
-                                           messages: messages, maxTokens: 4096)
+                                           messages: messages, maxTokens: 4096,
+                                           jsonMode: jsonMode)
         if completion.text.isEmpty, completion.finishReason == "length" {
             // Truncated mid-reasoning — retry once with a doubled budget.
             completion = try await attempt(provider: provider, apiKey: apiKey,
-                                           messages: messages, maxTokens: 8192)
+                                           messages: messages, maxTokens: 8192,
+                                           jsonMode: jsonMode)
             guard !completion.text.isEmpty else {
                 throw AIError.noValidResult(truncated: true)
             }
@@ -133,14 +142,17 @@ final class AIClient {
 
     // MARK: - Private
 
-    /// One request (with response_format 400-fallback) reduced to a Completion.
+    /// One request (with response_format 400-fallback, JSON mode only) reduced
+    /// to a Completion.
     private func attempt(provider: ProviderConfig, apiKey: String,
                          messages: [Message], maxTokens: Int,
+                         jsonMode: Bool,
                          timeout: TimeInterval? = nil) async throws -> Completion {
         do {
             return try await send(provider: provider, apiKey: apiKey, messages: messages,
-                                  responseFormat: .jsonObject, maxTokens: maxTokens, timeout: timeout)
-        } catch let AIError.http(status, _) where status == 400 {
+                                  responseFormat: jsonMode ? .jsonObject : nil,
+                                  maxTokens: maxTokens, timeout: timeout)
+        } catch let AIError.http(status, _) where status == 400 && jsonMode {
             // Compatibility fallback: some strict endpoints reject response_format.
             return try await send(provider: provider, apiKey: apiKey, messages: messages,
                                   responseFormat: nil, maxTokens: maxTokens, timeout: timeout)
@@ -153,16 +165,21 @@ final class AIClient {
         let request = try makeRequest(provider: provider, apiKey: apiKey,
                                       messages: messages, responseFormat: responseFormat,
                                       maxTokens: maxTokens, timeout: timeout)
+        DiagnosticLog.note("http → \(provider.model) json=\(responseFormat != nil) max=\(maxTokens.map(String.init) ?? "nil")")
+        let started = Date()
         let (data, response): (Data, URLResponse)
         do {
             (data, response) = try await Self.session.data(for: request)
         } catch let error as URLError {
+            DiagnosticLog.note("http ✗ network \(error.code.rawValue) after \(Int(Date().timeIntervalSince(started) * 1000))ms")
             throw AIError.network(error.localizedDescription)
         }
         guard let http = response as? HTTPURLResponse else {
+            DiagnosticLog.note("http ✗ not HTTPURLResponse")
             throw AIError.malformedResponse
         }
         guard (200..<300).contains(http.statusCode) else {
+            DiagnosticLog.note("http ✗ status \(http.statusCode): \(Self.serverMessage(from: data).prefix(120))")
             throw AIError.http(status: http.statusCode, message: Self.serverMessage(from: data))
         }
         let body: ResponseBody
@@ -170,20 +187,33 @@ final class AIClient {
             body = try JSONDecoder().decode(ResponseBody.self, from: data)
         } catch {
             // HTTP 200 but the body is not a valid chat-completions payload.
+            DiagnosticLog.note("http ✗ body decode failed (\(data.count) bytes)")
             throw AIError.malformedResponse
         }
         let choice = body.choices?.first
         // 1) Final answer in content (think-tag blocks stripped).
         let content = PromptBuilder.stripThinkingTags(choice?.message.content ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        DiagnosticLog.note("http ✓ \(http.statusCode) in \(Int(Date().timeIntervalSince(started) * 1000))ms "
+            + "finish=\(choice?.finish_reason ?? "nil") content=\(content.count) "
+            + "reasoning=\((choice?.message.reasoning_content ?? "").count)")
         if !content.isEmpty {
             return Completion(text: content, finishReason: choice?.finish_reason)
         }
-        // 2) Reasoning models: NEVER return the thinking raw — only the last
-        //    valid JSON object rehearsed inside it (the final one wins).
+        // 2) Reasoning models: NEVER return the thinking raw — in JSON mode only
+        //    the last valid JSON object rehearsed inside it (the final one wins).
         let reasoning = choice?.message.reasoning_content ?? ""
-        if let json = PromptBuilder.extractLastValidJSON(in: reasoning) {
+        if responseFormat != nil, let json = PromptBuilder.extractLastValidJSON(in: reasoning) {
             return Completion(text: json, finishReason: choice?.finish_reason)
+        }
+        // 3) Plain-text mode: a reasoning model may leave the answer ONLY in
+        //    reasoning_content (content empty) — recover the cleaned text there
+        //    rather than failing the whole action.
+        if responseFormat == nil, !reasoning.isEmpty {
+            let recovered = PromptBuilder.extractPlainText(reasoning)
+            if !recovered.isEmpty {
+                return Completion(text: recovered, finishReason: choice?.finish_reason)
+            }
         }
         return Completion(text: "", finishReason: choice?.finish_reason)
     }

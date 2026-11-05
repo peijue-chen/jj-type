@@ -172,13 +172,14 @@ enum PromptBuilder {
 
     /// Quick-action reply hardening: weak models wrap the plain answer in JSON
     /// ("{"response": "…"}", "{"rewritten_text": "…"}", or even
-    /// "{"<the answer>": ""}") — sometimes with prose around it. Extraction
-    /// rules (deliberately conservative, so polishing a JSON code snippet is
-    /// NOT mangled): only SINGLE-entry objects of string values are unwrapped
-    /// — non-empty value wins; all-empty values fall back to the key (the
-    /// "answer in the key" shape). Embedded objects are scanned LAST-wins,
-    /// same rationale as the grammar parser. Everything else returns the
-    /// cleaned text unchanged.
+    /// "{"<the answer>": ""}") — sometimes with prose around it, sometimes
+    /// padded with metadata keys. Extraction rules (deliberately conservative,
+    /// so polishing a JSON code snippet is NOT mangled): only string-valued
+    /// objects are unwrapped — a single entry yields its value (or the key for
+    /// the "answer in the key" shape); multiple entries yield a value ONLY via
+    /// a known answer key (no shape guessing). Embedded objects are scanned
+    /// LAST-wins, same rationale as the grammar parser. Everything else
+    /// returns the cleaned text unchanged.
     static func extractPlainText(_ text: String) -> String {
         let cleaned = stripThinkingTags(stripFences(text))
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -189,13 +190,31 @@ enum PromptBuilder {
         return cleaned
     }
 
-    /// Unwraps a SINGLE-entry string-valued JSON object; nil = not that shape.
+    /// Answer-key candidates, in preference order — weak models padding a
+    /// plain-text answer with metadata ({"translation": "…", "lang": "en"})
+    /// must still yield the ANSWER, not the raw JSON.
+    private static let plainAnswerKeys = ["translation", "corrected", "text", "result",
+                                          "output", "response", "answer", "content",
+                                          "rewritten_text", "polished_text", "corrected_text"]
+
+    /// Unwraps a string-valued JSON object into the plain answer; nil = not
+    /// that shape. Single-entry objects: the value (or, for the "answer in the
+    /// key" shape, the key). Multi-entry objects: ONLY a known answer key —
+    /// no longest-value guessing, so an action whose legitimate OUTPUT is JSON
+    /// (polishing / rewriting a JSON snippet) is never mangled.
     private static func plainValue(fromJSONObject candidate: String) -> String? {
         guard let data = candidate.data(using: .utf8),
-              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: String],
-              object.count == 1 else { return nil }
-        if let value = object.values.first, !value.isEmpty { return value }
-        if let key = object.keys.first, !key.isEmpty { return key }
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: String] else {
+            return nil
+        }
+        if object.count == 1 {
+            if let value = object.values.first, !value.isEmpty { return value }
+            if let key = object.keys.first, !key.isEmpty { return key }
+            return nil
+        }
+        for key in plainAnswerKeys {
+            if let value = object[key], !value.isEmpty { return value }
+        }
         return nil
     }
 

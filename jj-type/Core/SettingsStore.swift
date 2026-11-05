@@ -91,18 +91,18 @@ final class SettingsStore {
         seedBuiltInActions()
     }
 
-    /// The built-ins (翻译 / 润色 / 改写) live IN the persisted list so their
-    /// prompts are user-editable; missing ones (first run OR upgrade from a
-    /// custom-only era) are inserted at the front. Edits are never overwritten
-    /// — seeding only fills ids that are absent.
+    /// The built-ins (翻译 / 纠正 / 润色 / 改写) live IN the persisted list so
+    /// their prompts are user-editable; missing ones (first run OR upgrade from
+    /// an earlier built-in set) are slotted into their CATALOG position — a
+    /// newly added built-in must not jump to the front on upgrade. Edits are
+    /// never overwritten — seeding keeps the stored prompt when the id exists.
     private func seedBuiltInActions() {
         let known = Set(aiActions.map(\.id))
-        var missing = QuickActionCatalog.builtIns.filter { !known.contains($0.id) }
-        guard !missing.isEmpty else { return }
-        missing.reverse()
-        for builtIn in missing {
-            aiActions.insert(builtIn, at: 0)
-        }
+        guard QuickActionCatalog.builtIns.contains(where: { !known.contains($0.id) }) else { return }
+        let stored = Dictionary(aiActions.map { ($0.id, $0) },
+                                uniquingKeysWith: { first, _ in first })
+        let customs = aiActions.filter { !QuickActionCatalog.builtInIds.contains($0.id) }
+        aiActions = QuickActionCatalog.builtIns.map { stored[$0.id] ?? $0 } + customs
         persistAIActions()
     }
 

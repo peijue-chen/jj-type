@@ -18,7 +18,6 @@ final class SelectionActionBarController {
     static let shared = SelectionActionBarController()
 
     /// Chip tap outcomes, executed by AppDelegate (owner of the AI pipeline).
-    var onCopy: ((String) -> Void)?
     var onQuickAction: ((QuickAction, String) -> Void)?
     var onGenerateQR: ((String) -> Void)?
 
@@ -166,16 +165,12 @@ final class SelectionActionBarController {
 
     private var isVisible: Bool { panel.isVisible }
 
-    /// Chips: 复制 first, then every quick action, then 二维码. Every chip
-    /// dismisses the bar BEFORE running its action (PopClip behavior).
+    /// Chips: every quick action, then 二维码 (复制 removed 2026-11-05 — the
+    /// selection is already IN the clipboard of the source app, and the chip
+    /// crowded the bar). Every chip dismisses the bar BEFORE running its
+    /// action (PopClip behavior).
     private func rebuildChips(for text: String) {
         chipsRow.arrangedSubviews.forEach { $0.removeFromSuperview() }
-
-        let copyChip = chip(title: "复制") { [weak self] in
-            self?.dismiss()
-            self?.onCopy?(text)
-        }
-        chipsRow.addArrangedSubview(copyChip)
 
         for action in actionsProvider?() ?? [] {
             let actionChip = chip(title: action.name) { [weak self] in

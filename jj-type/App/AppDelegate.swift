@@ -90,12 +90,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         selectionBar.actionsProvider = { [weak self] in
             self?.settingsStore.aiActions ?? []
         }
-        selectionBar.onCopy = { text in
-            let pasteboard = NSPasteboard.general
-            pasteboard.clearContents()
-            pasteboard.setString(text, forType: .string)
-            CaptureToast.shared.show("已复制", symbol: "doc.on.doc")
-        }
         selectionBar.onQuickAction = { [weak self] action, text in
             self?.lastCapturedSourceText = text
             self?.runQuickAction(action)
@@ -693,8 +687,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     no thinking.
     """
 
-    /// Runs a quick action (翻译 / 润色 / 改写 / custom) against the text of the
-    /// last capture and renders the raw reply in the same result panel.
+    /// Runs a quick action (翻译 / 纠正 / 润色 / 改写 / custom) against the
+    /// text of the last capture and renders the reply in the same result panel.
     private func runQuickAction(_ action: QuickAction) {
         guard let source = lastCapturedSourceText, !source.isEmpty,
               let panel = resultPanel else { return }
@@ -708,28 +702,104 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // The built-in 翻译 runs the EXACT pipeline of the ⌥D translation
+        // window (LanguageRouter → PromptBuilder → {"corrected","translation"}
+        // parse): identical prompt, JSON contract, reasoning-model recovery and
+        // truncation retry. The template pipeline could not match it on long
+        // selections (forced JSON mode on a plain-text instruction).
+        if action.id == QuickActionCatalog.translateActionID {
+            inFlightTask?.cancel()
+            panel.showQuickLoading(actionName: action.name)
+            DiagnosticLog.note("quick[\(action.name)] start len=\(source.count) provider=\(provider.model)")
+            inFlightTask = Task { [aiClient, panel] in
+                do {
+                    guard let apiKey = KeychainStore.loadAPIKey(for: provider.id), !apiKey.isEmpty else {
+                        DiagnosticLog.note("quick[\(action.name)] missing API key")
+                        panel.showError("该服务未配置 API Key，请在设置中填写")
+                        return
+                    }
+                    let task = LanguageRouter.makeTask(text: source)
+                    let systemPrompt = PromptBuilder.systemPrompt(mode: .translate,
+                                                                  language: task.language)
+                    let userPrompt = PromptBuilder.userPrompt(text: source, mode: .translate)
+                    var reply = try await aiClient.complete(provider: provider, apiKey: apiKey,
+                                                            systemPrompt: systemPrompt,
+                                                            userPrompt: userPrompt)
+                    if Task.isCancelled { return }
+                    // Reasoning models occasionally emit a literal "{}" (seen in
+                    // ai.log: content=2, answer rehearsed only in reasoning) —
+                    // one automatic retry beats making the user click again.
+                    if PromptBuilder.parse(reply) == nil {
+                        DiagnosticLog.note("quick[\(action.name)] parse failed (\(reply.prefix(40))) — retrying once")
+                        reply = try await aiClient.complete(provider: provider, apiKey: apiKey,
+                                                            systemPrompt: systemPrompt,
+                                                            userPrompt: userPrompt)
+                    }
+                    guard !Task.isCancelled else {
+                        DiagnosticLog.note("quick[\(action.name)] cancelled after complete")
+                        return
+                    }
+                    DiagnosticLog.note("quick[\(action.name)] reply \(reply.count) chars: \(reply.prefix(80))")
+                    guard let result = PromptBuilder.parse(reply) else {
+                        DiagnosticLog.note("quick[\(action.name)] parse failed after retry")
+                        panel.showError("AI 返回异常（未包含有效结果，可能被截断），请重试")
+                        return
+                    }
+                    let translated = (result.translation.isEmpty
+                                      ? result.corrected : result.translation)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if translated.isEmpty {
+                        DiagnosticLog.note("quick[\(action.name)] empty translation")
+                        panel.showError("AI 返回为空（可能被截断），请重试或更换模型")
+                    } else {
+                        DiagnosticLog.note("quick[\(action.name)] showing result \(translated.count) chars")
+                        panel.showQuickResult(title: action.name, text: translated,
+                                              replaceEnabled: AccessibilityPermission.isGranted)
+                    }
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    DiagnosticLog.note("quick[\(action.name)] error: \(error.localizedDescription)")
+                    panel.showError(Self.errorMessage(for: error))
+                }
+            }
+            return
+        }
+
+        // Plain-text actions (纠正 / 润色 / 改写 / custom): NO forced JSON mode —
+        // the answer is plain text, and json_object made long replies come back
+        // as truncated / multi-key JSON the extractor could not recover.
         inFlightTask?.cancel()
         panel.showQuickLoading(actionName: action.name)
+        DiagnosticLog.note("quick[\(action.name)] start len=\(source.count) provider=\(provider.model)")
         inFlightTask = Task { [aiClient, panel] in
             do {
                 guard let apiKey = KeychainStore.loadAPIKey(for: provider.id), !apiKey.isEmpty else {
+                    DiagnosticLog.note("quick[\(action.name)] missing API key")
                     panel.showError("该服务未配置 API Key，请在设置中填写")
                     return
                 }
                 let reply = try await aiClient.complete(provider: provider, apiKey: apiKey,
                                                         systemPrompt: Self.quickActionSystemPrompt,
-                                                        userPrompt: action.resolvedPrompt(for: source))
-                guard !Task.isCancelled else { return }
+                                                        userPrompt: action.resolvedPrompt(for: source),
+                                                        jsonMode: false)
+                guard !Task.isCancelled else {
+                    DiagnosticLog.note("quick[\(action.name)] cancelled after complete")
+                    return
+                }
+                DiagnosticLog.note("quick[\(action.name)] reply \(reply.count) chars: \(reply.prefix(80))")
                 // JSON-wrapped replies from weak models are unwrapped here.
                 let cleaned = PromptBuilder.extractPlainText(reply)
                 if cleaned.isEmpty {
+                    DiagnosticLog.note("quick[\(action.name)] empty after extract")
                     panel.showError("AI 返回为空（可能被截断），请重试或更换模型")
                 } else {
+                    DiagnosticLog.note("quick[\(action.name)] showing result \(cleaned.count) chars")
                     panel.showQuickResult(title: action.name, text: cleaned,
                                           replaceEnabled: AccessibilityPermission.isGranted)
                 }
             } catch {
                 guard !Task.isCancelled else { return }
+                DiagnosticLog.note("quick[\(action.name)] error: \(error.localizedDescription)")
                 panel.showError(Self.errorMessage(for: error))
             }
         }

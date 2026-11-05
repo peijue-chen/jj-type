@@ -629,7 +629,7 @@ final class SettingsWindowController: NSWindowController {
         barCard.content.addArrangedSubview(makeSectionHeader("划词动作条"))
         barCard.content.addArrangedSubview(barToggle)
         barCard.content.addArrangedSubview(
-            makeHint("在任意应用拖选文字后，鼠标下方自动出现动作条（复制 / AI 动作 / 二维码）；点击其它位置立即消失。需要辅助功能权限。"))
+            makeHint("在任意应用拖选文字后，鼠标下方自动出现动作条（AI 动作 / 二维码）；点击其它位置立即消失。需要辅助功能权限。"))
 
         // -- AI 动作编辑表单（默认隐藏）------------------------------------
         let newActionButton = Theme.primaryButton("新建动作…", symbol: "plus")
@@ -687,7 +687,7 @@ final class SettingsWindowController: NSWindowController {
         actionsCard.content.addArrangedSubview(newActionButton)
         actionsCard.content.addArrangedSubview(aiActionFormContainer)
         actionsCard.content.addArrangedSubview(
-            makeHint("内置 翻译 / 润色 / 改写 与自定义动作统一在此管理；提示词用 {text} 代表选中文本。内置动作可修改提示词，不可删除。"))
+            makeHint("内置 翻译 / 纠正 / 润色 / 改写 与自定义动作统一在此管理；提示词用 {text} 代表选中文本。内置动作可修改提示词，不可删除；其中「翻译」固定使用与翻译窗口相同的提示词与解析流程（修改其提示词不会生效）。"))
 
         // -- 剪贴板历史 -----------------------------------------------------
         let clearButton = Theme.button("清空剪贴板历史", symbol: "trash")

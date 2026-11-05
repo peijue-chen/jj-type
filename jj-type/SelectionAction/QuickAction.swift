@@ -2,8 +2,8 @@
 //  QuickAction.swift
 //  jj-type
 //
-//  AI quick actions for the selection result panel: three built-ins
-//  (翻译 / 润色 / 改写) plus user-defined prompt templates ({text}
+//  AI quick actions for the selection result panel: four built-ins
+//  (翻译 / 纠正 / 润色 / 改写) plus user-defined prompt templates ({text}
 //  placeholder), persisted by SettingsStore.
 //
 
@@ -33,7 +33,20 @@ struct QuickAction: Codable, Identifiable, Equatable {
 }
 
 enum QuickActionCatalog {
-    /// Built-in actions (翻译 / 润色 / 改写) — user decision 2026-11-03.
+    /// The built-in 翻译 action is NOT run through the template pipeline: it is
+    /// routed to the SAME LanguageRouter + PromptBuilder pipeline as the
+    /// ⌥D translation window (identical prompt, JSON contract and parser).
+    /// Rationale (2026-11-05): the template pipeline forced `json_object` on a
+    /// plain-text instruction, and for long selections reasoning models burned
+    /// the token budget / returned multi-key or truncated JSON that the
+    /// plain-text extractor could not recover — the selection-bar translation
+    /// broke exactly where the translation window worked. The persisted prompt
+    /// of this entry is therefore informational (kept editable for parity of
+    /// the settings UI, but not sent).
+    static let translateActionID = QuickAction.fixedId(1)
+
+    /// Built-in actions (翻译 / 纠正 / 润色 / 改写) — user decision 2026-11-03,
+    /// 纠正 added 2026-11-05. Order mirrors the ⌥D/⌥E hotkey pair.
     static let builtIns: [QuickAction] = [
         QuickAction(
             id: QuickAction.fixedId(1),
@@ -42,6 +55,16 @@ enum QuickActionCatalog {
             Translate the following text: English source → Chinese; Chinese or mixed \
             source → English; any other language → Chinese. Output ONLY the translation, \
             nothing else:
+            {text}
+            """
+        ),
+        QuickAction(
+            id: QuickAction.fixedId(4),
+            name: "纠正",
+            prompt: """
+            Correct the grammar, spelling and punctuation of the following text while \
+            keeping the original language, meaning and wording. Do not expand or rewrite. \
+            Output ONLY the corrected text, nothing else:
             {text}
             """
         ),
