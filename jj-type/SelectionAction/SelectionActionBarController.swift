@@ -3,11 +3,17 @@
 //  jj-type
 //
 //  PopClip-style selection action bar (utils-7): a drag-selection (mouseUp
-//  far enough from its mouseDown) triggers an AX-only selection read; when
+//  far enough from its mouseDown) triggers an AX-first selection read; when
 //  text is selected a small non-activating chip bar appears under the cursor
-//  — 复制 / every AI quick action / 二维码. Clicking anywhere outside (or a
-//  new selection, or Esc) dismisses it instantly. No polling, no clipboard
-//  side effects on detection.
+//  — every AI quick action / 二维码. Clicking anywhere outside (or a new
+//  selection, or Esc) dismisses it instantly.
+//
+//  Detection is PASSIVE: it must never disturb the user's clipboard. The AX
+//  path touches nothing; the synthetic-⌘C fallback runs with
+//  `clipboardPolicy: .restore`, which puts the previous pasteboard contents
+//  back (and keeps the transient write out of the clipboard history) — a plain
+//  drag used to overwrite the clipboard, so the user's own ⌘C appeared to copy
+//  the wrong characters.
 //
 
 import AppKit
@@ -134,8 +140,10 @@ final class SelectionActionBarController {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
             guard let self, self.enabled else { return }
             // AX-first with the synthetic-⌘C fallback (the SAME chain ⌥E
-            // uses) — apps without AX selected-text support still work.
-            self.textCapture.captureSelectedText { [weak self] result in
+            // uses) — apps without AX selected-text support still work. The
+            // fallback restores the pasteboard: watching every drag must be
+            // invisible to the user's own ⌘C.
+            self.textCapture.captureSelectedText(clipboardPolicy: .restore) { [weak self] result in
                 guard let self, self.enabled else { return }
                 switch result {
                 case .success(let text):
@@ -145,6 +153,26 @@ final class SelectionActionBarController {
                     NSLog("[JJType][SelectionBar] no selection — dismissed")
                     self.dismiss()
                 }
+            }
+        }
+    }
+
+    // MARK: - Explicit invocation (hotkey)
+
+    /// ⌥S (or the menu): the user explicitly asked for the bar, so the full
+    /// capture chain runs at the pointer WITHOUT restoring the pasteboard —
+    /// this also covers apps whose AX tree exposes no selected text, where
+    /// passive detection silently finds nothing.
+    func showForCurrentSelection(at location: NSPoint) {
+        dismiss()
+        textCapture.captureSelectedText(clipboardPolicy: .keep) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success(let text):
+                NSLog("[JJType][SelectionBar] hotkey selection %d chars", text.count)
+                self.show(text: text, at: location)
+            case .failure(let error):
+                CaptureToast.shared.show(error.localizedDescription, symbol: "text.cursor")
             }
         }
     }

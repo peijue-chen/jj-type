@@ -99,6 +99,7 @@ final class SettingsWindowController: NSWindowController {
     private var colorPickerRecorder: HotkeyRecorderView?
     private var qrCodeRecorder: HotkeyRecorderView?
     private var devToolRecorder: HotkeyRecorderView?
+    private var selectionBarRecorder: HotkeyRecorderView?
 
     // MARK: - Launch page
 
@@ -136,6 +137,8 @@ final class SettingsWindowController: NSWindowController {
     private var editingAIActionId: UUID?
     private let aiActionFormContainer = Theme.card()
     private let aiActionDeleteButton = Theme.button("删除", symbol: "trash")
+    /// The tools-page hint quotes the current selection-bar shortcut.
+    private var selectionBarHintLabel: NSTextField?
 
     // MARK: - Init
 
@@ -411,6 +414,7 @@ final class SettingsWindowController: NSWindowController {
         let bindings: [(label: String, hotkey: Hotkey, id: HotkeyManager.HotkeyID)] = [
             ("翻译", store.translateHotkey, .translate),
             ("纠正 + 翻译", store.correctHotkey, .correctAndTranslate),
+            ("划词动作条", store.selectionBarHotkey, .selectionBar),
             ("截图", store.captureHotkey, .capture),
             ("启动器", store.launcherHotkey, .launcher),
             ("剪贴板历史", store.clipboardHotkey, .clipboardHistory),
@@ -435,6 +439,7 @@ final class SettingsWindowController: NSWindowController {
             case .colorPicker: colorPickerRecorder = recorder
             case .qrCode: qrCodeRecorder = recorder
             case .devTool: devToolRecorder = recorder
+            case .selectionBar: selectionBarRecorder = recorder
             }
             if index > 0 { card.addSeparator() }
             card.content.addArrangedSubview(recorder)
@@ -625,11 +630,15 @@ final class SettingsWindowController: NSWindowController {
                                  target: self, action: #selector(selectionBarToggled(_:)))
         barToggle.state = store.selectionBarEnabled ? .on : .off
 
+        let selectionBarHint = makeHint(Self.selectionBarHintText(hotkey: store.selectionBarHotkey))
+        selectionBarHintLabel = selectionBarHint
+
         let barCard = Theme.card()
         barCard.content.addArrangedSubview(makeSectionHeader("划词动作条"))
         barCard.content.addArrangedSubview(barToggle)
         barCard.content.addArrangedSubview(
-            makeHint("在任意应用拖选文字后，鼠标下方自动出现动作条（AI 动作 / 二维码）；点击其它位置立即消失。需要辅助功能权限。"))
+            makeHint("在任意应用拖选文字后，鼠标下方自动出现动作条（AI 动作 / 二维码）；点击其它位置立即消失。需要辅助功能权限。检测只读取选中文字，不会改动你的剪贴板。"))
+        barCard.content.addArrangedSubview(selectionBarHint)
 
         // -- AI 动作编辑表单（默认隐藏）------------------------------------
         let newActionButton = Theme.primaryButton("新建动作…", symbol: "plus")
@@ -1180,6 +1189,7 @@ final class SettingsWindowController: NSWindowController {
         case .colorPicker: return store.colorPickerHotkey
         case .qrCode: return store.qrCodeHotkey
         case .devTool: return store.devToolHotkey
+        case .selectionBar: return store.selectionBarHotkey
         }
     }
 
@@ -1195,7 +1205,17 @@ final class SettingsWindowController: NSWindowController {
         case .colorPicker: store.colorPickerHotkey = hotkey
         case .qrCode: store.qrCodeHotkey = hotkey
         case .devTool: store.devToolHotkey = hotkey
+        case .selectionBar:
+            store.selectionBarHotkey = hotkey
+            selectionBarHintLabel?.stringValue = Self.selectionBarHintText(hotkey: hotkey)
         }
+    }
+
+    /// Tools-page hint quoting the current selection-bar shortcut (rewritten
+    /// when the binding changes on the 快捷键 page).
+    private static func selectionBarHintText(hotkey: Hotkey) -> String {
+        "关闭上面的自动显示后，仍可按 \(hotkey.displayText) 手动唤起动作条；" +
+            "浏览器 / Electron 等应用无法被动读取选中文本时，也用它。"
     }
 
     private func recorder(for id: HotkeyManager.HotkeyID) -> HotkeyRecorderView? {
@@ -1208,6 +1228,7 @@ final class SettingsWindowController: NSWindowController {
         case .colorPicker: return colorPickerRecorder
         case .qrCode: return qrCodeRecorder
         case .devTool: return devToolRecorder
+        case .selectionBar: return selectionBarRecorder
         }
     }
 
@@ -1407,6 +1428,7 @@ final class SettingsWindowController: NSWindowController {
         if store.colorPickerHotkey == hotkey { return "取色" }
         if store.qrCodeHotkey == hotkey { return "二维码" }
         if store.devToolHotkey == hotkey { return "开发工具" }
+        if store.selectionBarHotkey == hotkey { return "划词动作条" }
         return store.launchItems.first { $0.id != id && $0.hotkey == hotkey }?.name
     }
 

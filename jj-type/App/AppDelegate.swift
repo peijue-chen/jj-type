@@ -131,6 +131,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyManager.onDevTool = { [weak self] in
             MainActor.assumeIsolated { self?.toggleDevToolWindow() }
         }
+        hotkeyManager.onSelectionBar = { [weak self] in
+            MainActor.assumeIsolated { self?.runSelectionBarFlow() }
+        }
         hotkeyManager.onLaunchItem = { [weak self] slot in
             MainActor.assumeIsolated { self?.openLaunchItem(slot: slot) }
         }
@@ -522,6 +525,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         EyedropperController.shared.begin()
+    }
+
+    // MARK: - Selection action bar (explicit invocation)
+
+    /// ⌥S flow: the user asked for the chips, so this runs the FULL capture
+    /// chain (AX + synthetic-⌘C fallback) at the pointer and shows the bar —
+    /// the escape hatch when the automatic bar is switched off, and the only
+    /// way to reach it in apps that expose no AX selected text.
+    private func runSelectionBarFlow() {
+        guard AccessibilityPermission.isGranted else {
+            requestAccessibilityIfNeeded()
+            return
+        }
+        SelectionActionBarController.shared.showForCurrentSelection(at: NSEvent.mouseLocation)
     }
 
     // MARK: - Pipeline
@@ -1045,6 +1062,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             HotkeyManager.HotkeyID.colorPicker.rawValue: settingsStore.colorPickerHotkey,
             HotkeyManager.HotkeyID.qrCode.rawValue: settingsStore.qrCodeHotkey,
             HotkeyManager.HotkeyID.devTool.rawValue: settingsStore.devToolHotkey,
+            HotkeyManager.HotkeyID.selectionBar.rawValue: settingsStore.selectionBarHotkey,
         ]
         var names: [UInt32: String] = [
             HotkeyManager.HotkeyID.translate.rawValue: "翻译",
@@ -1055,6 +1073,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             HotkeyManager.HotkeyID.colorPicker.rawValue: "取色",
             HotkeyManager.HotkeyID.qrCode.rawValue: "二维码",
             HotkeyManager.HotkeyID.devTool.rawValue: "开发工具",
+            HotkeyManager.HotkeyID.selectionBar.rawValue: "划词动作条",
         ]
         for item in settingsStore.launchItems {
             guard let hotkey = item.hotkey else { continue }

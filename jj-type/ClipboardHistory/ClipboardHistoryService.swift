@@ -42,6 +42,14 @@ final class ClipboardHistoryService {
     /// The changeCount as last seen by us — either via polling or via our own
     /// writes (`noteOwnWrite`), which must never be recorded.
     private var lastSeenCount: Int
+    /// Depth of in-flight PASSIVE text captures (selection-bar drag watching).
+    /// Those synthesize ⌘C and put the pasteboard back afterwards; neither the
+    /// transient payload nor its restore is a real user copy, so nothing is
+    /// recorded while the window is open.
+    private var transientDepth = 0
+    /// Hard stop for a capture that never reports back — a stuck depth would
+    /// mute the recorder for the rest of the session.
+    private var transientDeadline: Date?
 
     private let directory: URL
     private let indexURL: URL
@@ -85,7 +93,42 @@ final class ClipboardHistoryService {
         let count = pasteboard.changeCount
         guard count != lastSeenCount else { return }
         lastSeenCount = count
+        // Passive selection capture (synthetic ⌘C + restore): skip entirely.
+        guard !isRecordingSuppressed() else { return }
         record(pasteboard)
+    }
+
+    // MARK: - Transient windows
+
+    /// Brackets a passive capture (TextCaptureService's `restore` policy).
+    /// While any window is open the poller re-baselines the changeCount
+    /// without recording, so a mere drag selection never lands in the history.
+    func beginTransientCapture() {
+        transientDepth += 1
+        transientDeadline = Date().addingTimeInterval(3)
+    }
+
+    /// Closing the last window re-baselines again: the restore write itself is
+    /// ours and must not be recorded either. `recordCurrent` is for the case
+    /// where a FOREIGN write landed inside the window (the user's own ⌘C) —
+    /// that is a real copy, so it is left for the next poll instead of being
+    /// swallowed by the re-baseline.
+    func endTransientCapture(recordCurrent: Bool = false) {
+        transientDepth = max(0, transientDepth - 1)
+        guard transientDepth == 0 else { return }
+        transientDeadline = nil
+        guard !recordCurrent else { return }
+        noteOwnWrite()
+    }
+
+    private func isRecordingSuppressed() -> Bool {
+        guard transientDepth > 0 else { return false }
+        if let transientDeadline, Date() > transientDeadline {
+            transientDepth = 0
+            self.transientDeadline = nil
+            return false
+        }
+        return true
     }
 
     private func record(_ pasteboard: NSPasteboard) {

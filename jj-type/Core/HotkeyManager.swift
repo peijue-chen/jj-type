@@ -28,6 +28,10 @@ struct Hotkey: Codable, Equatable {
     static let defaultQRCode = Hotkey(keyCode: UInt32(kVK_ANSI_Q), modifierFlags: NSEvent.ModifierFlags.option.rawValue)
     /// Developer tool window: ⌥J ("JSON").
     static let defaultDevTool = Hotkey(keyCode: UInt32(kVK_ANSI_J), modifierFlags: NSEvent.ModifierFlags.option.rawValue)
+    /// Selection action bar ("select"): ⌥S — the explicit way to summon the
+    /// chips when the automatic bar is switched off (or in apps whose AX tree
+    /// exposes no selected text).
+    static let defaultSelectionBar = Hotkey(keyCode: UInt32(kVK_ANSI_S), modifierFlags: NSEvent.ModifierFlags.option.rawValue)
 
     var carbonModifiers: UInt32 {
         var carbon: UInt32 = 0
@@ -100,6 +104,7 @@ final class HotkeyManager {
         case colorPicker = 6
         case qrCode = 7
         case devTool = 8
+        case selectionBar = 9
     }
 
     /// Dynamic ids (launch items) start here so they can never collide with the
@@ -117,6 +122,7 @@ final class HotkeyManager {
     var onColorPicker: (() -> Void)?
     var onQRCode: (() -> Void)?
     var onDevTool: (() -> Void)?
+    var onSelectionBar: (() -> Void)?
     /// Fires with the launch item's own hotkey slot (see `launchItemSlotRange`).
     var onLaunchItem: ((UInt32) -> Void)?
 
@@ -203,6 +209,8 @@ final class HotkeyManager {
                     onQRCode?()
                 case .devTool:
                     onDevTool?()
+                case .selectionBar:
+                    onSelectionBar?()
                 }
             } else {
                 onLaunchItem?(id)

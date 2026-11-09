@@ -11,6 +11,12 @@
 //  AX itself is unavailable does the legacy snapshot → ⌘C → changeCount-poll
 //  fallback run (main queue, bounded ticks).
 //
+//  ClipboardPolicy decides whether that fallback may keep what it copied:
+//  explicit user commands (hotkeys) keep it, while PASSIVE detection (the
+//  selection bar watching every drag) must leave the pasteboard exactly as it
+//  was — a drag that silently replaced the user's clipboard made their own ⌘C
+//  appear to "copy the wrong characters".
+//
 
 import AppKit
 import ApplicationServices
@@ -34,6 +40,15 @@ enum CaptureError: LocalizedError, Equatable {
 }
 
 final class TextCaptureService {
+    /// What the synthetic-⌘C fallback is allowed to leave on the pasteboard.
+    enum ClipboardPolicy {
+        /// Explicit user action (hotkey / panel): the captured text may stay.
+        case keep
+        /// Passive detection (drag watching): restore the previous contents,
+        /// so simply selecting text never rewrites the user's clipboard.
+        case restore
+    }
+
     private let pollInterval: TimeInterval = 0.02
     private let axQueue = DispatchQueue(label: "com.aigens.jj-type.axcapture", qos: .userInitiated)
     /// Bounds every AX IPC round-trip so a busy target app cannot stall us.
@@ -47,6 +62,7 @@ final class TextCaptureService {
 
     /// Entry point for both hotkey flows. Returns on the main actor.
     func captureSelectedText(timeout: TimeInterval = 1.0,
+                             clipboardPolicy: ClipboardPolicy = .keep,
                              completion: @escaping @MainActor (Result<String, CaptureError>) -> Void) {
         // Defensive entry check (AppDelegate gates upstream; keep the error case reachable).
         guard AccessibilityPermission.isGranted else {
@@ -68,7 +84,8 @@ final class TextCaptureService {
                     // Never simulate ⌘C here — that is what copied caret text.
                     completion(.failure(.emptySelection))
                 case .unavailable:
-                    self.legacyClipboardCapture(timeout: timeout, completion: completion)
+                    self.legacyClipboardCapture(timeout: timeout, policy: clipboardPolicy,
+                                                completion: completion)
                 }
             }
         }
@@ -113,35 +130,78 @@ final class TextCaptureService {
     // MARK: - Legacy clipboard fallback
 
     private func legacyClipboardCapture(timeout: TimeInterval,
+                                        policy: ClipboardPolicy,
                                         completion: @escaping @MainActor (Result<String, CaptureError>) -> Void) {
         let pasteboard = NSPasteboard.general
+        // Snapshot BEFORE the synthetic ⌘C: this is what `restore` puts back.
+        let snapshot = policy == .restore ? PasteboardSnapshot(pasteboard) : nil
+        if policy == .restore {
+            // Keep the transient write (and its restore) out of the clipboard
+            // history — the user never asked to copy anything.
+            ClipboardHistoryService.shared.beginTransientCapture()
+        }
         let previousCount = pasteboard.changeCount
 
         postCommandC()
 
         let deadline = Date().addingTimeInterval(timeout)
-        pollPasteboard(pasteboard, previousCount: previousCount,
-                       deadline: deadline, completion: completion)
+        pollPasteboard(pasteboard, previousCount: previousCount, deadline: deadline) { [weak self] result, raw, count in
+            if let snapshot {
+                let restored = self?.restoreIfUntouched(snapshot, raw: raw, count: count,
+                                                        previousCount: previousCount,
+                                                        pasteboard: pasteboard) ?? false
+                // More than one write inside the window = the user (or another
+                // app) copied too: that copy is real, so let the recorder keep it.
+                ClipboardHistoryService.shared.endTransientCapture(
+                    recordCurrent: !restored && count > previousCount + 1)
+            }
+            completion(result)
+        }
+    }
+
+    /// Puts the snapshot back ONLY when our synthetic ⌘C was the sole write:
+    /// `previousCount + 1` means "one write happened", any higher count means
+    /// the user (or another app) copied meanwhile — restoring then would
+    /// overwrite that fresh copy, which is exactly the bug being fixed.
+    /// `raw` is the string the copy produced (nil when the app copied a
+    /// non-text payload, e.g. an image selection) — compared as an Optional so
+    /// those payloads are restored too.
+    @discardableResult
+    private func restoreIfUntouched(_ snapshot: PasteboardSnapshot,
+                                    raw: String?,
+                                    count: Int,
+                                    previousCount: Int,
+                                    pasteboard: NSPasteboard) -> Bool {
+        guard count == previousCount + 1,
+              pasteboard.string(forType: .string) == raw else { return false }
+        snapshot.apply(to: pasteboard)
+        return true
     }
 
     private func pollPasteboard(_ pasteboard: NSPasteboard,
                                 previousCount: Int,
                                 deadline: Date,
-                                completion: @escaping @MainActor (Result<String, CaptureError>) -> Void) {
+                                completion: @escaping @MainActor (Result<String, CaptureError>, String?, Int) -> Void) {
+        // Strong self on purpose: the poll chain MUST reach a completion (the
+        // ⌥E pipeline awaits it in a continuation — a dropped callback would
+        // hang the panel forever). The deadline bounds the retention.
         DispatchQueue.main.asyncAfter(deadline: .now() + pollInterval) {
-            if pasteboard.changeCount != previousCount {
-                let text = (pasteboard.string(forType: .string) ?? "")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            let count = pasteboard.changeCount
+            if count != previousCount {
+                // Optional on purpose: nil = the copy produced no text (image
+                // selection), which the restore path must still recognise.
+                let raw = pasteboard.string(forType: .string)
+                let text = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 if text.isEmpty {
-                    completion(.failure(.emptySelection))
+                    completion(.failure(.emptySelection), raw, count)
                 } else {
-                    completion(.success(text))
+                    completion(.success(text), raw, count)
                 }
             } else if Date() < deadline {
                 self.pollPasteboard(pasteboard, previousCount: previousCount,
                                     deadline: deadline, completion: completion)
             } else {
-                completion(.failure(.timeout))
+                completion(.failure(.timeout), nil, count)
             }
         }
     }
@@ -156,5 +216,36 @@ final class TextCaptureService {
         keyUp?.flags = CGEventFlags.maskCommand
         keyDown?.post(tap: .cgSessionEventTap)
         keyUp?.post(tap: .cgSessionEventTap)
+    }
+}
+
+/// Full pasteboard contents (every item, every type) captured before a
+/// transient synthetic ⌘C, so it can be put back byte-for-byte.
+private struct PasteboardSnapshot {
+    private let items: [[NSPasteboard.PasteboardType: Data]]
+
+    init(_ pasteboard: NSPasteboard) {
+        items = (pasteboard.pasteboardItems ?? []).map { item in
+            var storage: [NSPasteboard.PasteboardType: Data] = [:]
+            for type in item.types {
+                if let data = item.data(forType: type) {
+                    storage[type] = data
+                }
+            }
+            return storage
+        }
+    }
+
+    func apply(to pasteboard: NSPasteboard) {
+        pasteboard.clearContents()
+        guard !items.isEmpty else { return }
+        let restored = items.map { storage -> NSPasteboardItem in
+            let item = NSPasteboardItem()
+            for (type, data) in storage {
+                item.setData(data, forType: type)
+            }
+            return item
+        }
+        pasteboard.writeObjects(restored)
     }
 }

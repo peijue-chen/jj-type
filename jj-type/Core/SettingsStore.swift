@@ -38,6 +38,7 @@ final class SettingsStore {
         static let hotkeyColorPicker = "jjtype.hotkey.colorPicker"
         static let hotkeyQRCode = "jjtype.hotkey.qrCode"
         static let hotkeyDevTool = "jjtype.hotkey.devTool"
+        static let hotkeySelectionBar = "jjtype.hotkey.selectionBar"
         static let colorHistory = "jjtype.colorPicker.history"
         static let captureSaveDirectory = "jjtype.capture.saveDirectory"
         static let captureFormat = "jjtype.capture.format"
@@ -158,6 +159,13 @@ final class SettingsStore {
     var devToolHotkey: Hotkey {
         get { hotkey(forKey: Key.hotkeyDevTool) ?? .defaultDevTool }
         set { saveHotkey(newValue, forKey: Key.hotkeyDevTool); onHotkeyChanged?() }
+    }
+
+    /// Summons the selection action bar on demand (works even when the
+    /// automatic bar is disabled).
+    var selectionBarHotkey: Hotkey {
+        get { hotkey(forKey: Key.hotkeySelectionBar) ?? .defaultSelectionBar }
+        set { saveHotkey(newValue, forKey: Key.hotkeySelectionBar); onHotkeyChanged?() }
     }
 
     /// Recent picked colors (as copied strings), newest first, capped at 12.
