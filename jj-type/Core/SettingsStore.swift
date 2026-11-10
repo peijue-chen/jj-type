@@ -47,6 +47,7 @@ final class SettingsStore {
         static let preferredTerminal = "jjtype.terminal.preferred"
         static let aiActions = "jjtype.aiActions"
         static let selectionBar = "jjtype.selectionBar.enabled"
+        static let selectionBarDirectTranslate = "jjtype.selectionBar.directTranslate"
     }
 
     /// Fired whenever the provider list or active provider changes (menu rebuild).
@@ -115,6 +116,14 @@ final class SettingsStore {
                 : defaults.bool(forKey: Key.selectionBar)
         }
         set { defaults.set(newValue, forKey: Key.selectionBar) }
+    }
+
+    /// 「快捷键直接翻译」: the selection-bar hotkey skips the chip bar and runs
+    /// the built-in 翻译 action on the selection immediately. Defaults OFF
+    /// (the bar is the discoverable behavior).
+    var selectionBarDirectTranslate: Bool {
+        get { defaults.bool(forKey: Key.selectionBarDirectTranslate) }
+        set { defaults.set(newValue, forKey: Key.selectionBarDirectTranslate) }
     }
 
     var activeProvider: ProviderConfig? {

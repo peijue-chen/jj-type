@@ -30,12 +30,22 @@ enum Theme {
     static let cardPadding: CGFloat = 14
     static let rowSpacing: CGFloat = 10
 
+    // MARK: - Brand accent
+
+    /// The app icon's violet. Every accent in the UI uses this instead of
+    /// `controlAccentColor`: the system accent follows the user's macOS
+    /// highlight color (blue by default) and looked foreign next to the
+    /// indigo→violet icon — the "划词那里蓝色有点怪" report.
+    static let accent = NSColor(srgbRed: 0.45, green: 0.27, blue: 0.92, alpha: 1)
+    /// Deeper indigo end of the icon gradient (emphasis / hover variants).
+    static let accentDeep = NSColor(srgbRed: 0.23, green: 0.25, blue: 0.86, alpha: 1)
+
     // MARK: - Buttons
 
     /// Accent-filled emphasis button (save / primary action).
     static func primaryButton(_ title: String, symbol: String? = nil) -> NSButton {
         let button = baseButton(title, symbol: symbol)
-        button.bezelColor = .controlAccentColor
+        button.bezelColor = accent
         button.attributedTitle = NSAttributedString(
             string: title,
             attributes: [
@@ -48,6 +58,31 @@ enum Theme {
     /// Regular rounded push button.
     static func button(_ title: String, symbol: String? = nil) -> NSButton {
         baseButton(title, symbol: symbol)
+    }
+
+    /// Borderless icon-only button (speaker / stop affordances in card
+    /// headers). Fixed 22×20 hit area so a bare glyph stays clickable.
+    static func iconButton(symbol: String, toolTip: String? = nil) -> NSButton {
+        let button = NSButton(title: "", target: nil, action: nil)
+        button.bezelStyle = .inline
+        button.isBordered = false
+        button.imagePosition = .imageOnly
+        button.imageScaling = .scaleProportionallyDown
+        button.contentTintColor = .secondaryLabelColor
+        button.toolTip = toolTip
+        button.setAccessibilityLabel(toolTip)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            button.widthAnchor.constraint(equalToConstant: 22),
+            button.heightAnchor.constraint(equalToConstant: 20),
+        ])
+        setSymbol(symbol, on: button)
+        return button
+    }
+
+    /// Swaps an icon button's glyph (speaker ↔ stop) without rebuilding it.
+    static func setSymbol(_ symbol: String, on button: NSButton) {
+        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
     }
 
     private static func baseButton(_ title: String, symbol: String?) -> NSButton {

@@ -56,6 +56,14 @@ final class TranslationWindowController: NSWindowController {
     private let resultTextView = NSTextView()
     private var presenter: TranslationContentView?
 
+    /// Speaker buttons (input / translation) and the IPA label of the input —
+    /// shown only when the input is a single English word.
+    private let speakInputButton = Theme.iconButton(symbol: "speaker.wave.2", toolTip: "朗读输入")
+    private let speakResultButton = Theme.iconButton(symbol: "speaker.wave.2", toolTip: "朗读译文")
+    private let inputPhoneticLabel = NSTextField(labelWithString: "")
+    private var phoneticWorkItem: DispatchWorkItem?
+    private var speechObserver: NSObjectProtocol?
+
     /// Character count of the captured selection currently pre-filled (nil when
     /// the user typed the text) — shown so the capture source stays visible.
     private var prefillCount: Int?
@@ -81,6 +89,13 @@ final class TranslationWindowController: NSWindowController {
         content.controller = self
         presenter = content
         buildLayout(in: content)
+        inputTextView.delegate = self
+        // Speaker glyphs follow the shared speech state (a stop from another
+        // surface must not leave this window showing "speaking").
+        speechObserver = NotificationCenter.default.addObserver(
+            forName: .jjTypeSpeechStateChanged, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.refreshSpeakButtons() }
+            }
 
         // Explicit restore from our own key (wins over autosave).
         let savedRect = UserDefaults.standard.string(forKey: Self.frameKey)
@@ -113,6 +128,9 @@ final class TranslationWindowController: NSWindowController {
                 self?.statusFadeWorkItem = nil
                 self?.removeOutsideMonitors()
                 self?.saveFrame()
+                // The window is the only stop control — never leave a voice
+                // talking to a closed window.
+                SpeechService.shared.stop()
             }
         }
     }
@@ -148,6 +166,9 @@ final class TranslationWindowController: NSWindowController {
         prefillCount = text.count
         window?.orderFrontRegardless()
         installOutsideMonitors()
+        // Programmatic writes bypass the text-view delegate.
+        updateInputPhonetic(debounced: false)
+        refreshSpeakButtons()
         translateClicked()
     }
 
@@ -168,6 +189,7 @@ final class TranslationWindowController: NSWindowController {
 
     func showResult(_ translation: String) {
         resultTextView.string = translation
+        refreshSpeakButtons()
         setSpinner(false)
         if let prefillCount {
             setStatus("已获取选中文本（\(prefillCount) 字）· 已自动复制",
@@ -184,6 +206,7 @@ final class TranslationWindowController: NSWindowController {
 
     func showError(_ message: String) {
         setSpinner(false)
+        refreshSpeakButtons()
         setStatus(message, color: .systemRed, fades: true)
     }
 
@@ -193,6 +216,7 @@ final class TranslationWindowController: NSWindowController {
         statusFadeWorkItem = nil
         removeOutsideMonitors()
         saveFrame()
+        SpeechService.shared.stop()
         window?.orderOut(nil)
     }
 
@@ -250,14 +274,29 @@ final class TranslationWindowController: NSWindowController {
         buttonsRow.spacing = 12
         buttonsRow.alignment = .centerY
 
+        // Speaker buttons + IPA label live in the card headers.
+        speakInputButton.target = self
+        speakInputButton.action = #selector(speakInputClicked)
+        speakResultButton.target = self
+        speakResultButton.action = #selector(speakResultClicked)
+        inputPhoneticLabel.font = .systemFont(ofSize: 11)
+        inputPhoneticLabel.textColor = .secondaryLabelColor
+        inputPhoneticLabel.lineBreakMode = .byTruncatingTail
+        inputPhoneticLabel.isHidden = true
+
+        let inputHeader = makeHeaderRow(title: "输入", phonetic: inputPhoneticLabel,
+                                        button: speakInputButton)
+        let resultHeader = makeHeaderRow(title: "译文", phonetic: nil,
+                                         button: speakResultButton)
+
         // Same grouped-card language as Settings / QR windows.
         let inputCard = Theme.card()
-        inputCard.content.addArrangedSubview(Theme.sectionHeader("输入"))
+        inputCard.content.addArrangedSubview(inputHeader)
         inputCard.content.addArrangedSubview(inputScroll)
         inputCard.content.addArrangedSubview(buttonsRow)
 
         let resultCard = Theme.card()
-        resultCard.content.addArrangedSubview(Theme.sectionHeader("译文"))
+        resultCard.content.addArrangedSubview(resultHeader)
         resultCard.content.addArrangedSubview(resultScroll)
 
         let stack = NSStackView(views: [inputCard, resultCard])
@@ -272,6 +311,10 @@ final class TranslationWindowController: NSWindowController {
             stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -14),
             inputCard.widthAnchor.constraint(equalTo: stack.widthAnchor),
             resultCard.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            inputHeader.widthAnchor.constraint(
+                equalTo: inputCard.widthAnchor, constant: -Theme.cardPadding * 2),
+            resultHeader.widthAnchor.constraint(
+                equalTo: resultCard.widthAnchor, constant: -Theme.cardPadding * 2),
             inputScroll.widthAnchor.constraint(
                 equalTo: inputCard.widthAnchor, constant: -Theme.cardPadding * 2),
             resultScroll.widthAnchor.constraint(
@@ -281,11 +324,87 @@ final class TranslationWindowController: NSWindowController {
         ])
     }
 
+    /// Card header: [title] [phonetic] …spacer… [speaker].
+    private func makeHeaderRow(title: String, phonetic: NSTextField?,
+                               button: NSButton) -> NSStackView {
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        spacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        var views: [NSView] = [Theme.sectionHeader(title)]
+        if let phonetic { views.append(phonetic) }
+        views.append(spacer)
+        views.append(button)
+        let row = NSStackView(views: views)
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        return row
+    }
+
+    // MARK: - Speech & phonetics
+
+    @objc private func speakInputClicked() {
+        SpeechService.shared.toggle(inputTextView.string)
+    }
+
+    @objc private func speakResultClicked() {
+        SpeechService.shared.toggle(resultTextView.string)
+    }
+
+    /// Speaker glyphs + enabled state follow the current texts and the shared
+    /// speech state (a stop from another surface must reset this window too).
+    private func refreshSpeakButtons() {
+        let input = inputTextView.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        let result = resultTextView.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        let speech = SpeechService.shared
+        speakInputButton.isEnabled = !input.isEmpty
+        speakResultButton.isEnabled = !result.isEmpty
+        Theme.setSymbol(speech.isSpeaking(input) ? "stop.fill" : "speaker.wave.2",
+                        on: speakInputButton)
+        Theme.setSymbol(speech.isSpeaking(result) ? "stop.fill" : "speaker.wave.2",
+                        on: speakResultButton)
+        speakInputButton.toolTip = speech.isSpeaking(input) ? "停止朗读" : "朗读输入"
+        speakResultButton.toolTip = speech.isSpeaking(result) ? "停止朗读" : "朗读译文"
+    }
+
+    /// Debounced IPA refresh — typing must not fire a dictionary lookup per
+    /// keystroke. `debounced: false` is for programmatic writes (prefill /
+    /// clear / restore), which never reach the text-view delegate.
+    private func updateInputPhonetic(debounced: Bool) {
+        phoneticWorkItem?.cancel()
+        phoneticWorkItem = nil
+        let text = inputTextView.string
+        guard debounced else {
+            applyPhonetic(for: text)
+            return
+        }
+        let work = DispatchWorkItem { [weak self] in self?.applyPhonetic(for: text) }
+        phoneticWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
+    }
+
+    private func applyPhonetic(for text: String) {
+        guard PhoneticService.isSingleEnglishWord(text) else {
+            inputPhoneticLabel.stringValue = ""
+            inputPhoneticLabel.isHidden = true
+            return
+        }
+        PhoneticService.lookup(text) { [weak self] phonetic in
+            guard let self else { return }
+            // The input may have changed while the lookup ran.
+            guard self.inputTextView.string.trimmingCharacters(in: .whitespacesAndNewlines)
+                    == text.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
+            self.inputPhoneticLabel.stringValue = phonetic ?? ""
+            self.inputPhoneticLabel.isHidden = (phonetic ?? "").isEmpty
+        }
+    }
+
     @objc fileprivate func translateClicked() {
         let text = inputTextView.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         setLoading(true)
         resultTextView.string = ""
+        refreshSpeakButtons()
         onTranslate?(text)
     }
 
@@ -295,6 +414,8 @@ final class TranslationWindowController: NSWindowController {
         prefillCount = nil
         setStatus("", color: .secondaryLabelColor, fades: false)
         LastTranslation.clear()
+        updateInputPhonetic(debounced: false)
+        refreshSpeakButtons()
         window?.makeFirstResponder(inputTextView)
     }
 
@@ -346,6 +467,8 @@ final class TranslationWindowController: NSWindowController {
         guard let last = LastTranslation.load() else { return }
         inputTextView.string = last.input
         resultTextView.string = last.result
+        updateInputPhonetic(debounced: false)
+        refreshSpeakButtons()
     }
 
     /// SINGLE status-write helper (It10 #1): always cancels any pending fade,
@@ -397,6 +520,16 @@ final class TranslationWindowController: NSWindowController {
         if !window.frame.contains(NSEvent.mouseLocation) {
             dismissWindow()
         }
+    }
+}
+
+// MARK: - NSTextViewDelegate
+
+extension TranslationWindowController: NSTextViewDelegate {
+    /// Typing updates the IPA label (debounced) and the speaker availability.
+    func textDidChange(_ notification: Notification) {
+        updateInputPhonetic(debounced: true)
+        refreshSpeakButtons()
     }
 }
 

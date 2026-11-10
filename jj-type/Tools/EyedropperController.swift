@@ -352,7 +352,7 @@ private final class HistorySwatchButton: NSButton {
         layer?.masksToBounds = true
         layer?.borderColor = NSColor.labelColor.withAlphaComponent(0.3).cgColor
         layer?.borderWidth = 1
-        let color = Self.parse(hex) ?? .controlAccentColor
+        let color = Self.parse(hex) ?? Theme.accent
         layer?.backgroundColor = color.cgColor
         toolTip = hex
     }

@@ -54,7 +54,7 @@ final class HotkeyRecorderView: NSView {
         label.font = Theme.bodyMedium()
         valueField.font = Theme.mono()
         valueField.alignment = .center
-        valueField.textColor = .controlAccentColor
+        valueField.textColor = Theme.accent
         hint.font = Theme.caption()
         hint.textColor = .tertiaryLabelColor
         hint.stringValue = allowsClearing ? "\(Self.defaultHint)，⌫ 清除" : Self.defaultHint
@@ -102,10 +102,10 @@ final class HotkeyRecorderView: NSView {
         layer?.cornerRadius = 8
         layer?.borderWidth = accent ? 2 : 1
         layer?.borderColor = accent
-            ? NSColor.controlAccentColor.cgColor
+            ? Theme.accent.cgColor
             : NSColor.labelColor.withAlphaComponent(0.12).cgColor
         layer?.backgroundColor = accent
-            ? NSColor.controlAccentColor.withAlphaComponent(0.08).cgColor
+            ? Theme.accent.withAlphaComponent(0.08).cgColor
             : NSColor.labelColor.withAlphaComponent(0.05).cgColor
     }
 
@@ -171,7 +171,7 @@ final class HotkeyRecorderView: NSView {
     private func refreshDisplay() {
         if let hotkey {
             valueField.stringValue = hotkey.displayText
-            valueField.textColor = .controlAccentColor
+            valueField.textColor = Theme.accent
         } else {
             valueField.stringValue = "未设置"
             valueField.textColor = .tertiaryLabelColor

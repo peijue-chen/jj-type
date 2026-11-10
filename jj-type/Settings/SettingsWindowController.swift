@@ -630,6 +630,12 @@ final class SettingsWindowController: NSWindowController {
                                  target: self, action: #selector(selectionBarToggled(_:)))
         barToggle.state = store.selectionBarEnabled ? .on : .off
 
+        // 「快捷键直接翻译」: the hotkey skips the bar and translates at once.
+        let directToggle = NSButton(checkboxWithTitle: "快捷键直接翻译（不显示动作条）",
+                                    target: self,
+                                    action: #selector(selectionBarDirectTranslateToggled(_:)))
+        directToggle.state = store.selectionBarDirectTranslate ? .on : .off
+
         let selectionBarHint = makeHint(Self.selectionBarHintText(hotkey: store.selectionBarHotkey))
         selectionBarHintLabel = selectionBarHint
 
@@ -639,6 +645,9 @@ final class SettingsWindowController: NSWindowController {
         barCard.content.addArrangedSubview(
             makeHint("在任意应用拖选文字后，鼠标下方自动出现动作条（AI 动作 / 二维码）；点击其它位置立即消失。需要辅助功能权限。检测只读取选中文字，不会改动你的剪贴板。"))
         barCard.content.addArrangedSubview(selectionBarHint)
+        barCard.content.addArrangedSubview(directToggle)
+        barCard.content.addArrangedSubview(
+            makeHint("开启后，划词快捷键会直接翻译选中文字并弹出结果，不再先显示动作条（少点一次）。"))
 
         // -- AI 动作编辑表单（默认隐藏）------------------------------------
         let newActionButton = Theme.primaryButton("新建动作…", symbol: "plus")
@@ -716,6 +725,10 @@ final class SettingsWindowController: NSWindowController {
         let enabled = sender.state == .on
         store.selectionBarEnabled = enabled
         SelectionActionBarController.shared.setEnabled(enabled)
+    }
+
+    @objc private func selectionBarDirectTranslateToggled(_ sender: NSButton) {
+        store.selectionBarDirectTranslate = sender.state == .on
     }
 
     @objc private func clearClipboardHistory() {
@@ -1583,7 +1596,7 @@ final class SettingsSidebarRowView: NSView {
         super.updateLayer()
         layer?.cornerRadius = 7
         layer?.backgroundColor = isSelected
-            ? NSColor.controlAccentColor.withAlphaComponent(0.16).cgColor
+            ? Theme.accent.withAlphaComponent(0.16).cgColor
             : nil
     }
 }

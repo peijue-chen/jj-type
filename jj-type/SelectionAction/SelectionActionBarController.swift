@@ -42,6 +42,10 @@ final class SelectionActionBarController {
     private var dismissMonitors: [Any] = []
     private var enabled = false
     private var mouseDownLocation: NSPoint?
+    /// Text the bar was built for — the 朗读 chip reads it.
+    private var barText = ""
+    private weak var speakChip: NSButton?
+    private var speechObserver: NSObjectProtocol?
     /// Below this drag distance a mouseUp is a click, not a selection.
     private static let dragThreshold: CGFloat = 12
 
@@ -79,6 +83,13 @@ final class SelectionActionBarController {
             chipsRow.topAnchor.constraint(equalTo: background.topAnchor),
             chipsRow.bottomAnchor.constraint(equalTo: background.bottomAnchor),
         ])
+
+        // The 朗读 chip flips to 停止 while speaking (and back when the
+        // utterance finishes on its own).
+        speechObserver = NotificationCenter.default.addObserver(
+            forName: .jjTypeSpeechStateChanged, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.refreshSpeakChip() }
+            }
     }
 
     // MARK: - Enable / disable (settings-driven)
@@ -193,12 +204,25 @@ final class SelectionActionBarController {
 
     private var isVisible: Bool { panel.isVisible }
 
-    /// Chips: every quick action, then 二维码 (复制 removed 2026-11-05 — the
-    /// selection is already IN the clipboard of the source app, and the chip
-    /// crowded the bar). Every chip dismisses the bar BEFORE running its
-    /// action (PopClip behavior).
+    /// Chips: 朗读, every quick action, then 二维码 (复制 removed 2026-11-05 —
+    /// the selection is already IN the clipboard of the source app, and the
+    /// chip crowded the bar). Every chip dismisses the bar BEFORE running its
+    /// action (PopClip behavior) — except 朗读, which must stay clickable so a
+    /// second click can stop the voice.
     private func rebuildChips(for text: String) {
         chipsRow.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        barText = text
+
+        // 朗读 first: hearing the selection is the most direct action, and it
+        // deliberately does NOT dismiss the bar — a second click stops the
+        // voice (the bar is the only stop control while it is on screen).
+        let speak = chip(title: SpeechService.shared.isSpeaking(text) ? "停止" : "朗读") {
+            [weak self] in
+            SpeechService.shared.toggle(text)
+            self?.refreshSpeakChip()
+        }
+        speakChip = speak
+        chipsRow.addArrangedSubview(speak)
 
         for action in actionsProvider?() ?? [] {
             let actionChip = chip(title: action.name) { [weak self] in
@@ -214,6 +238,15 @@ final class SelectionActionBarController {
         }
         chipsRow.addArrangedSubview(qrChip)
 
+        panel.setContentSize(NSSize(width: max(200, chipsRow.fittingSize.width), height: 40))
+    }
+
+    /// Keeps the 朗读 chip's title in sync with the shared speech state.
+    private func refreshSpeakChip() {
+        guard let speakChip else { return }
+        let title = SpeechService.shared.isSpeaking(barText) ? "停止" : "朗读"
+        guard speakChip.title != title else { return }
+        speakChip.title = title
         panel.setContentSize(NSSize(width: max(200, chipsRow.fittingSize.width), height: 40))
     }
 

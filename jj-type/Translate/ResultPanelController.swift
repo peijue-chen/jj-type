@@ -29,6 +29,19 @@ final class ResultPanelController: NSObject {
     /// AI quick-action chips (built-ins + custom), shown in the result state.
     private let actionsRow = NSStackView()
 
+    /// Source text of the last capture: the speaker reads it, and its IPA is
+    /// shown when it is a single English word. Set by AppDelegate before each
+    /// show (the panel never displays the source itself).
+    var sourceText: String = ""
+    private let sourceSpeakButton = Theme.iconButton(symbol: "speaker.wave.2", toolTip: "朗读原文")
+    private let sourceCaption = NSTextField(labelWithString: "原文")
+    private let sourcePhoneticLabel = NSTextField(labelWithString: "")
+    private let sourceRow = NSStackView()
+    private var speechObserver: NSObjectProtocol?
+    /// Text the current IPA label belongs to — speech-state notifications call
+    /// `refreshSourceRow()` repeatedly and must not re-run the lookup.
+    private var phoneticSourceText = ""
+
     /// Set by AppDelegate before each flow; clicking a chip fires this.
     var quickActions: [QuickAction] = []
     var onQuickAction: ((QuickAction) -> Void)?
@@ -64,6 +77,12 @@ final class ResultPanelController: NSObject {
 
         buildLayout(in: background)
         panel.contentView = background
+        // Speaker glyph follows the shared speech state (a stop from another
+        // surface must reset this panel too).
+        speechObserver = NotificationCenter.default.addObserver(
+            forName: .jjTypeSpeechStateChanged, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.refreshSourceRow() }
+            }
     }
 
     var isVisible: Bool { panel.isVisible }
@@ -104,6 +123,7 @@ final class ResultPanelController: NSObject {
         }
         setState(.result)
         rebuildQuickActionButtons()
+        refreshSourceRow()
         refit()
     }
 
@@ -142,6 +162,7 @@ final class ResultPanelController: NSObject {
         }
         setState(.result)
         rebuildQuickActionButtons()
+        refreshSourceRow()
         refit()
     }
 
@@ -161,6 +182,9 @@ final class ResultPanelController: NSObject {
     func dismiss() {
         cancelAutoDismiss()
         removeDismissMonitors()
+        // The panel is the only stop control — never leave a voice talking to
+        // a dismissed panel.
+        SpeechService.shared.stop()
         panel.orderOut(nil)
         onDismiss?()
         onDismiss = nil
@@ -181,7 +205,7 @@ final class ResultPanelController: NSObject {
 
         for caption in [correctedCaption, translationCaption] {
             caption.font = .systemFont(ofSize: 11, weight: .semibold)
-            caption.textColor = .controlAccentColor
+            caption.textColor = Theme.accent
         }
         for label in [correctedLabel, translationLabel] {
             label.font = .systemFont(ofSize: 13)
@@ -215,7 +239,25 @@ final class ResultPanelController: NSObject {
         let buttonsRow = NSStackView(views: [replaceButton, copyButton, closeButton])
         buttonsRow.spacing = 12
 
+        // Source row: 原文 + speaker + IPA of the captured text (result only).
+        sourceSpeakButton.target = self
+        sourceSpeakButton.action = #selector(speakSourceClicked)
+        sourceCaption.font = .systemFont(ofSize: 11, weight: .semibold)
+        sourceCaption.textColor = Theme.accent
+        sourcePhoneticLabel.font = .systemFont(ofSize: 11)
+        sourcePhoneticLabel.textColor = .secondaryLabelColor
+        sourcePhoneticLabel.lineBreakMode = .byTruncatingTail
+        sourcePhoneticLabel.isHidden = true
+        sourceRow.orientation = .horizontal
+        sourceRow.alignment = .centerY
+        sourceRow.spacing = 6
+        sourceRow.addArrangedSubview(sourceCaption)
+        sourceRow.addArrangedSubview(sourceSpeakButton)
+        sourceRow.addArrangedSubview(sourcePhoneticLabel)
+        sourceRow.isHidden = true
+
         stack.addArrangedSubview(loadingRow)
+        stack.addArrangedSubview(sourceRow)
         stack.addArrangedSubview(errorLabel)
         stack.addArrangedSubview(correctedCaption)
         stack.addArrangedSubview(correctedLabel)
@@ -261,7 +303,7 @@ final class ResultPanelController: NSObject {
         button.controlSize = .regular
         // The replace action is the emphasis of the result state — accent fill.
         if button === replaceButton {
-            button.bezelColor = .controlAccentColor
+            button.bezelColor = Theme.accent
             button.attributedTitle = NSAttributedString(
                 string: button.title,
                 attributes: [
@@ -275,6 +317,7 @@ final class ResultPanelController: NSObject {
         let loading = stack.arrangedSubviews.count > 0 ? stack.arrangedSubviews[0] : nil
         let buttons = stack.arrangedSubviews.last
         loading?.isHidden = state != .loading
+        sourceRow.isHidden = state != .result || sourceText.isEmpty
         errorLabel.isHidden = state != .error
         correctedCaption.isHidden = state != .result || correctedLabel.stringValue.isEmpty
         correctedLabel.isHidden = state != .result || correctedLabel.stringValue.isEmpty
@@ -356,6 +399,34 @@ final class ResultPanelController: NSObject {
 
     private func handleKeyEvent(_ event: NSEvent) {
         if event.keyCode == UInt16(kVK_Escape) { dismiss() }
+    }
+
+    // MARK: - Source speaker & phonetics
+
+    @objc private func speakSourceClicked() {
+        SpeechService.shared.toggle(sourceText)
+    }
+
+    /// Speaker glyph + IPA label for the captured source text. The row keeps a
+    /// constant height (the button is always there), so a late phonetic result
+    /// never resizes the panel.
+    private func refreshSourceRow() {
+        let text = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let speech = SpeechService.shared
+        sourceSpeakButton.isEnabled = !text.isEmpty
+        Theme.setSymbol(speech.isSpeaking(text) ? "stop.fill" : "speaker.wave.2",
+                        on: sourceSpeakButton)
+        sourceSpeakButton.toolTip = speech.isSpeaking(text) ? "停止朗读" : "朗读原文"
+        guard text != phoneticSourceText else { return }
+        phoneticSourceText = text
+        sourcePhoneticLabel.stringValue = ""
+        sourcePhoneticLabel.isHidden = true
+        guard PhoneticService.isSingleEnglishWord(text) else { return }
+        PhoneticService.lookup(text) { [weak self] phonetic in
+            guard let self, self.phoneticSourceText == text else { return }
+            self.sourcePhoneticLabel.stringValue = phonetic ?? ""
+            self.sourcePhoneticLabel.isHidden = (phonetic ?? "").isEmpty
+        }
     }
 
     // MARK: - Actions

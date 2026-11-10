@@ -313,13 +313,13 @@ final class CaptureToolbarController {
         for (tool, button) in toolButtons {
             let isOn = tool == activeTool
             button.state = isOn ? .on : .off
-            button.contentTintColor = isOn ? .controlAccentColor : .labelColor
+            button.contentTintColor = isOn ? Theme.accent : .labelColor
         }
         for (index, button) in colorButtons.enumerated() {
             let selected = index == style.colorIndex
             // Accent ring: a white ring would vanish on the white swatch.
             button.layer?.borderWidth = selected ? 2 : 0
-            button.layer?.borderColor = selected ? NSColor.controlAccentColor.cgColor : nil
+            button.layer?.borderColor = selected ? Theme.accent.cgColor : nil
         }
         widthControl.selectedSegment = style.widthIndex
         undoButton?.isEnabled = canUndo

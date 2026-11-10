@@ -163,7 +163,7 @@ final class CaptureOverlayView: NSView {
         if let hoverRect {
             let outline = NSBezierPath(rect: hoverRect.insetBy(dx: 1, dy: 1))
             outline.lineWidth = 2
-            NSColor.controlAccentColor.setStroke()
+            Theme.accent.setStroke()
             outline.stroke()
         }
 
@@ -284,7 +284,7 @@ final class CaptureOverlayView: NSView {
         border.lineWidth = 1
         border.stroke()
 
-        NSColor.controlAccentColor.setStroke()
+        Theme.accent.setStroke()
         let inner = NSBezierPath(rect: rect.insetBy(dx: 1, dy: 1))
         inner.lineWidth = 1
         inner.stroke()
@@ -294,7 +294,7 @@ final class CaptureOverlayView: NSView {
             let path = NSBezierPath(rect: handleRect)
             NSColor.white.setFill()
             path.fill()
-            NSColor.controlAccentColor.setStroke()
+            Theme.accent.setStroke()
             path.lineWidth = 1
             path.stroke()
         }

@@ -209,6 +209,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Carbon hotkeys are released with the process; nothing to clean up manually.
         // caffeinate children are NOT killed with their parent — stop them here.
         keepAwake.shutdown()
+        // Never let a voice outlive the app.
+        SpeechService.shared.stop()
     }
 
     // MARK: - Main menu (Edit shortcuts for text fields)
@@ -533,12 +535,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// chain (AX + synthetic-⌘C fallback) at the pointer and shows the bar —
     /// the escape hatch when the automatic bar is switched off, and the only
     /// way to reach it in apps that expose no AX selected text.
+    /// With 「快捷键直接翻译」 on, the same capture runs the built-in 翻译
+    /// action straight away — no bar, no second click.
     private func runSelectionBarFlow() {
         guard AccessibilityPermission.isGranted else {
             requestAccessibilityIfNeeded()
             return
         }
+        if settingsStore.selectionBarDirectTranslate {
+            runDirectTranslateFlow()
+            return
+        }
         SelectionActionBarController.shared.showForCurrentSelection(at: NSEvent.mouseLocation)
+    }
+
+    /// ⌥S with 「快捷键直接翻译」: capture the selection and run the built-in
+    /// 翻译 action immediately (same pipeline as the 翻译 chip — the result
+    /// panel is the only UI). The pasteboard is kept: this is an explicit
+    /// user command, exactly like the bar path.
+    private func runDirectTranslateFlow() {
+        SelectionActionBarController.shared.dismiss()
+        guard let action = settingsStore.aiActions.first(where: {
+            $0.id == QuickActionCatalog.translateActionID
+        }) else { return }
+        textCapture.captureSelectedText(clipboardPolicy: .keep) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success(let text):
+                lastCapturedSourceText = text
+                runQuickAction(action)
+            case .failure(let error):
+                CaptureToast.shared.show(error.localizedDescription, symbol: "text.cursor")
+            }
+        }
     }
 
     // MARK: - Pipeline
@@ -582,6 +611,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             case .success(let text):
                 lastCapturedSourceText = text
+                // The panel's speaker reads the captured source and shows its
+                // IPA when it is a single English word.
+                panel.sourceText = text
                 let task = LanguageRouter.makeTask(text: text)
                 let systemPrompt = PromptBuilder.systemPrompt(mode: mode, language: task.language)
                 let userPrompt = PromptBuilder.userPrompt(text: text, mode: mode)
@@ -714,6 +746,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // refresh the chips so a Settings edit is reflected immediately.
         SelectionActionBarController.shared.dismiss()
         panel.quickActions = settingsStore.aiActions
+        panel.sourceText = source
         guard let provider = settingsStore.activeProvider else {
             panel.showError("尚未选择当前使用的 AI 服务，请在菜单栏图标或设置… 中选择")
             return
