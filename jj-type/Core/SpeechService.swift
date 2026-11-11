@@ -36,9 +36,12 @@ final class SpeechService: NSObject {
 
     // MARK: - Public API
 
-    /// True when `text` is the utterance in flight (trimmed comparison).
+    /// True when `text` is the utterance in flight (queued OR speaking).
+    /// Deliberately keyed on `currentText`, not `synthesizer.isSpeaking`:
+    /// the latter stays false for a beat after `speak()` returns, and a click
+    /// in that window must be a stop, not a restart.
     func isSpeaking(_ text: String) -> Bool {
-        guard synthesizer.isSpeaking, let currentText else { return false }
+        guard let currentText else { return false }
         return currentText == Self.normalize(text)
     }
 
@@ -61,6 +64,21 @@ final class SpeechService: NSObject {
         if synthesizer.isSpeaking {
             synthesizer.stopSpeaking(at: .immediate)
         }
+        // State flips IMMEDIATELY (glyphs + a rapid second click = stop).
+        currentText = trimmed
+        notifyStateChanged()
+        // Known AVSpeechSynthesizer quirk on macOS: a speak() issued in the
+        // same beat as stopSpeaking(at: .immediate) can be silently dropped —
+        // always give the synthesizer a beat. The identity check in
+        // startUtterance lets a stop or a newer text win inside the window.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.startUtterance(trimmed)
+        }
+    }
+
+    private func startUtterance(_ trimmed: String) {
+        // Superseded (another text) or stopped within the deferral window.
+        guard currentText == trimmed else { return }
         let utterance = AVSpeechUtterance(string: trimmed)
         utterance.voice = Self.voice(for: trimmed)
         // A single word is read slightly slower — it is usually a word the
@@ -68,9 +86,7 @@ final class SpeechService: NSObject {
         utterance.rate = trimmed.contains(where: \.isWhitespace)
             ? AVSpeechUtteranceDefaultSpeechRate
             : 0.45
-        currentText = trimmed
         synthesizer.speak(utterance)
-        notifyStateChanged()
     }
 
     func stop() {

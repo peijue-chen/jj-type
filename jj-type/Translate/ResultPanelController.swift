@@ -255,6 +255,12 @@ final class ResultPanelController: NSObject {
         sourceRow.addArrangedSubview(sourceSpeakButton)
         sourceRow.addArrangedSubview(sourcePhoneticLabel)
         sourceRow.isHidden = true
+        // The panel width is fixed: a long IPA (a long word) must truncate,
+        // never overflow the rounded edge.
+        sourcePhoneticLabel.setContentCompressionResistancePriority(.defaultLow,
+                                                                    for: .horizontal)
+        sourceRow.widthAnchor.constraint(lessThanOrEqualToConstant: panelWidth - 32)
+            .isActive = true
 
         stack.addArrangedSubview(loadingRow)
         stack.addArrangedSubview(sourceRow)
@@ -332,6 +338,18 @@ final class ResultPanelController: NSObject {
     private func refit() {
         panel.setContentSize(NSSize(width: panelWidth, height: stack.fittingSize.height))
         panel.contentView?.needsLayout = true
+        // The origin stays fixed while the height grows: re-clamp vertically
+        // so a tall result (arriving after the panel was positioned) never
+        // crosses the top of the screen.
+        if panel.isVisible,
+           let visible = screenContaining(panel.frame.origin)?.visibleFrame {
+            let ceiling = max(visible.minY + 12, visible.maxY - panel.frame.height - 8)
+            var origin = panel.frame.origin
+            origin.y = min(max(origin.y, visible.minY + 12), ceiling)
+            if origin.y != panel.frame.origin.y {
+                panel.setFrameOrigin(origin)
+            }
+        }
     }
 
     private func present(near point: NSPoint) {
@@ -342,17 +360,25 @@ final class ResultPanelController: NSObject {
         panel.orderFrontRegardless()
     }
 
+    /// Right-and-below the selection by default; when there is not enough
+    /// room below (text at the bottom of the screen) the panel flips ABOVE
+    /// the selection — clamping to the screen bottom instead would cover the
+    /// text and park the panel in the Dock's slide-in strip.
     private func positionPanel(near point: NSPoint) {
         let size = panel.frame.size
         var origin = NSPoint(x: point.x + 16, y: point.y - 16 - size.height)
-        // Flip below the cursor when the panel would cross the top edge.
         if let screen = screenContaining(point) {
             let visible = screen.visibleFrame
-            if origin.y + size.height > visible.maxY {
-                origin.y = point.y - 24 - size.height
+            // Bottom flip: the natural spot would fall off the screen → put
+            // the panel above the selection instead.
+            if origin.y < visible.minY + 12 {
+                origin.y = point.y + 24
             }
+            // Top guard: a tall panel flipped up must still fit; overlapping
+            // the cursor is the acceptable fallback, off-screen is not.
+            origin.y = min(max(origin.y, visible.minY + 12),
+                           max(visible.minY + 12, visible.maxY - size.height - 8))
             origin.x = min(max(origin.x, visible.minX + 8), visible.maxX - size.width - 8)
-            origin.y = max(origin.y, visible.minY + 8)
         }
         panel.setFrameOrigin(origin)
     }

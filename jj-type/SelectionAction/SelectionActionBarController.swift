@@ -259,16 +259,20 @@ final class SelectionActionBarController {
         return button
     }
 
-    /// Below the selection end point; flips above the cursor near edges.
+    /// Below the selection end point; when there is not enough room below
+    /// (selection at the bottom of the screen — the natural spot would fall
+    /// off-screen or into the Dock strip) the bar flips ABOVE the selection.
     private func positionPanel(at location: NSPoint) {
         let size = panel.frame.size
         let screen = NSScreen.screens.first { $0.frame.contains(location) } ?? NSScreen.main
         guard let visible = screen?.visibleFrame else { return }
         var origin = NSPoint(x: location.x - size.width / 2, y: location.y - size.height - 14)
         origin.x = min(max(origin.x, visible.minX + 8), visible.maxX - size.width - 8)
-        if origin.y < visible.minY + 8 {
+        if origin.y < visible.minY + 12 {
             origin.y = location.y + 18
         }
+        // Top guard: a bar flipped up must never cross the top of the screen.
+        origin.y = min(origin.y, visible.maxY - size.height - 8)
         panel.setFrameOrigin(origin)
     }
 

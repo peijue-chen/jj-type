@@ -287,6 +287,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                      action: #selector(openLauncherMenu), keyEquivalent: "").target = self
         menu.addItem(withTitle: "截图  \(settingsStore.captureHotkey.displayText)",
                      action: #selector(startCapture), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "取色  \(settingsStore.colorPickerHotkey.displayText)",
+                     action: #selector(openColorPicker), keyEquivalent: "").target = self
         menu.addItem(withTitle: "剪贴板历史  \(settingsStore.clipboardHotkey.displayText)",
                      action: #selector(openClipboardHistory), keyEquivalent: "").target = self
         menu.addItem(withTitle: "二维码  \(settingsStore.qrCodeHotkey.displayText)",
@@ -517,6 +519,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // MARK: - Screen color picker
+
+    /// Status-menu entry for the picker (the hotkey is not the only way in).
+    @objc private func openColorPicker() {
+        runColorPickerFlow()
+    }
 
     /// ⌥P flow: the loupe samples pixels via CGDisplayCreateImage, which needs
     /// the same Screen Recording grant as the screenshot flow.

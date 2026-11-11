@@ -283,6 +283,10 @@ final class TranslationWindowController: NSWindowController {
         inputPhoneticLabel.textColor = .secondaryLabelColor
         inputPhoneticLabel.lineBreakMode = .byTruncatingTail
         inputPhoneticLabel.isHidden = true
+        // The header row is width-constrained: the IPA yields before the
+        // title or the speaker button.
+        inputPhoneticLabel.setContentCompressionResistancePriority(.defaultLow,
+                                                                   for: .horizontal)
 
         let inputHeader = makeHeaderRow(title: "输入", phonetic: inputPhoneticLabel,
                                         button: speakInputButton)
