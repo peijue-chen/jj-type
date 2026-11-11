@@ -3,8 +3,8 @@
 //  jj-type
 //
 //  Settings UI in the macOS System Settings shape: a translucent sidebar
-//  (tinted icon tiles + section names) picks one of six card-based pages —
-//  AI 服务 / 快捷键 / 快捷启动 / 终端 / 截图 / 划词动作. Every page is a
+//  (tinted icon tiles + section names) picks one of seven card-based pages —
+//  通用 / AI 服务 / 快捷键 / 快捷启动 / 终端 / 截图 / 划词动作. Every page is a
 //  stack of rounded grouped cards (Theme.card()); the window auto-fits the
 //  visible page. A shared footer shows the running version on every page.
 //
@@ -26,6 +26,10 @@ final class SettingsWindowController: NSWindowController {
     }
 
     private let specs: [PageSpec] = [
+        PageSpec(title: "通用", subtitle: "开机自启与系统集成",
+                 symbol: "gearshape.fill",
+                 colors: [NSColor(red: 0.36, green: 0.40, blue: 0.47, alpha: 1),
+                          NSColor(red: 0.55, green: 0.60, blue: 0.68, alpha: 1)]),
         PageSpec(title: "AI 服务", subtitle: "OpenAI 兼容的服务商与密钥管理",
                  symbol: "sparkles",
                  colors: [NSColor(red: 0.42, green: 0.20, blue: 0.90, alpha: 1),
@@ -140,6 +144,17 @@ final class SettingsWindowController: NSWindowController {
     /// The tools-page hint quotes the current selection-bar shortcut.
     private var selectionBarHintLabel: NSTextField?
 
+    // MARK: - General page (开机自启)
+
+    /// Kept so page switches / window re-activation can re-read the system
+    /// login-item state (the user may have changed it in System Settings).
+    private weak var generalPage: NSStackView?
+    private var launchAtLoginToggle: NSButton?
+    private var launchAtLoginStatusLabel: NSTextField?
+    private var launchAtLoginSettingsButton: NSButton?
+    /// Last register/unregister failure, shown in red until the next refresh.
+    private var launchAtLoginError: String?
+
     // MARK: - Init
 
     convenience init(store: SettingsStore) {
@@ -161,13 +176,24 @@ final class SettingsWindowController: NSWindowController {
         window.contentViewController?.view = content
         self.store = store
         buildChrome(in: content)
-        pages = [makeProvidersPage(), makeHotkeyPage(), makeLaunchPage(),
-                 makeTerminalPage(), makeCapturePage(), makeToolsPage()]
+        pages = [makeGeneralPage(), makeProvidersPage(), makeHotkeyPage(),
+                 makeLaunchPage(), makeTerminalPage(), makeCapturePage(),
+                 makeToolsPage()]
         reloadTable()
         reloadForm()
         reloadLaunchTable()
         reloadLaunchForm()
-        selectPage(0)
+        // 通用 is the first sidebar row, but AI 服务 stays the landing page
+        // (first-run setup lives there) — look it up by title so inserting a
+        // page never silently changes the default.
+        if let index = specs.firstIndex(where: { $0.title == "AI 服务" }) {
+            selectPage(index)
+        }
+        // Returning from 系统设置 → 登录项 must re-read the real state: the
+        // user may have just approved (or switched off) the login item.
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(settingsWindowDidBecomeKey(_:)),
+            name: NSWindow.didBecomeKeyNotification, object: window)
         // Constraints were added AFTER the contentViewController assignment, so
         // the window kept the content view's initial frame — snap it to the real
         // fitting size of the visible page now that layout is fully defined.
@@ -341,6 +367,111 @@ final class SettingsWindowController: NSWindowController {
 
     private func pinFieldWidth(_ field: NSView, width: CGFloat = 300) {
         field.widthAnchor.constraint(equalToConstant: width).isActive = true
+    }
+
+    // MARK: - Page 0: 通用 (launch at login)
+
+    private func makeGeneralPage() -> NSStackView {
+        let toggle = NSButton(checkboxWithTitle: "开机时自动启动 JJType",
+                              target: self, action: #selector(launchAtLoginToggled(_:)))
+        launchAtLoginToggle = toggle
+
+        let status = NSTextField(labelWithString: "")
+        status.font = Theme.caption()
+        launchAtLoginStatusLabel = status
+
+        let settingsButton = Theme.button("打开登录项设置", symbol: "arrow.up.forward.app")
+        settingsButton.target = self
+        settingsButton.action = #selector(openLoginItemsSettings)
+        settingsButton.isHidden = true
+        launchAtLoginSettingsButton = settingsButton
+
+        let statusRow = NSStackView(views: [status, settingsButton])
+        statusRow.orientation = .horizontal
+        statusRow.alignment = .centerY
+        statusRow.spacing = 8
+
+        let card = Theme.card()
+        card.content.addArrangedSubview(makeSectionHeader("启动"))
+        card.content.addArrangedSubview(toggle)
+        card.content.addArrangedSubview(statusRow)
+        card.content.addArrangedSubview(
+            makeHint("开启后 JJType 会随 macOS 登录自动运行，条目可在 系统设置 → 通用 → 登录项 中查看或关闭。"))
+        if !LaunchAtLoginService.isInApplicationsFolder {
+            card.content.addArrangedSubview(
+                makeHint("当前运行的 JJType 不在「应用程序」文件夹，登录项会指向现在这个位置；"
+                         + "建议先把它拖进「应用程序」再开启。"))
+        }
+
+        let page = makePage([card])
+        generalPage = page
+        refreshLaunchAtLoginState(refit: false)
+        return page
+    }
+
+    @objc private func launchAtLoginToggled(_ sender: NSButton) {
+        let wanted = sender.state == .on
+        launchAtLoginError = nil
+        // A requiresApproval item can only be re-enabled by the user in
+        // System Settings — register() would just fail again, so send them
+        // straight to the pane instead of showing a bogus error.
+        if wanted, LaunchAtLoginService.state == .requiresApproval {
+            LaunchAtLoginService.openSystemSettings()
+            refreshLaunchAtLoginState()
+            return
+        }
+        do {
+            try LaunchAtLoginService.setEnabled(wanted)
+        } catch {
+            launchAtLoginError = "设置失败：\(error.localizedDescription)"
+        }
+        // The system status is the truth: a failed register leaves the box
+        // unchecked, and a requiresApproval result shows the approval hint.
+        refreshLaunchAtLoginState()
+    }
+
+    @objc private func openLoginItemsSettings() {
+        LaunchAtLoginService.openSystemSettings()
+    }
+
+    /// The user may have flipped the login item in System Settings while this
+    /// window was in the background — re-read the state on every re-activation.
+    @objc private func settingsWindowDidBecomeKey(_ notification: Notification) {
+        guard currentPage === generalPage else { return }
+        launchAtLoginError = nil
+        refreshLaunchAtLoginState()
+    }
+
+    /// Re-reads SMAppService and repaints the checkbox / status / deep link.
+    /// `refit` is false while the page is being built or switched to (the
+    /// caller resizes the window itself right after).
+    private func refreshLaunchAtLoginState(refit: Bool = true) {
+        let state = LaunchAtLoginService.state
+        launchAtLoginToggle?.state = state == .enabled ? .on : .off
+        if let error = launchAtLoginError {
+            launchAtLoginStatusLabel?.stringValue = error
+            launchAtLoginStatusLabel?.textColor = .systemRed
+        } else {
+            switch state {
+            case .enabled:
+                launchAtLoginStatusLabel?.stringValue = "已开启"
+                launchAtLoginStatusLabel?.textColor = .systemGreen
+            case .notRegistered:
+                launchAtLoginStatusLabel?.stringValue = "未开启"
+                launchAtLoginStatusLabel?.textColor = .secondaryLabelColor
+            case .requiresApproval:
+                launchAtLoginStatusLabel?.stringValue = "已被系统关闭，需在「登录项」中允许"
+                launchAtLoginStatusLabel?.textColor = .systemOrange
+            case .unavailable:
+                launchAtLoginStatusLabel?.stringValue = "当前系统不支持登录项"
+                launchAtLoginStatusLabel?.textColor = .secondaryLabelColor
+            }
+        }
+        // The deep link is the only way out of requiresApproval (and of a
+        // failed registration), so it appears exactly in those two cases.
+        launchAtLoginSettingsButton?.isHidden =
+            !(state == .requiresApproval || launchAtLoginError != nil)
+        if refit { resizeWindowToFit() }
     }
 
     // MARK: - Page 1: AI providers (OpenAI-compatible provider CRUD)
@@ -844,6 +975,12 @@ final class SettingsWindowController: NSWindowController {
         // installed state every time the page is shown.
         if terminalPage != nil, pages[index] === terminalPage {
             refreshTerminalPopup()
+        }
+        // Same idea for the login item: the user may have changed it in
+        // System Settings since the page was last shown.
+        if generalPage != nil, pages[index] === generalPage {
+            launchAtLoginError = nil
+            refreshLaunchAtLoginState(refit: false)
         }
         resizeWindowToFit()
     }
