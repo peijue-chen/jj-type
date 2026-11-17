@@ -102,12 +102,20 @@ final class ResultPanelController: NSObject {
     }
 
     func showResult(_ result: GrammarResult, replaceEnabled: Bool) {
-        let hasCorrected = !result.corrected.isEmpty
+        let corrected = result.corrected.trimmingCharacters(in: .whitespacesAndNewlines)
+        let translation = result.translation.trimmingCharacters(in: .whitespacesAndNewlines)
+        let source = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Display gate: a "correction" identical to the source or to the
+        // translation is noise (translate mode echoes the source when nothing
+        // was misspelled) — only a genuine fix earns the extra row.
+        let hasCorrected = !corrected.isEmpty && corrected != source && corrected != translation
         // A quick action may have re-titled the caption; restore the default.
         translationCaption.stringValue = "翻译"
-        correctedLabel.stringValue = result.corrected
+        correctedLabel.stringValue = hasCorrected ? corrected : ""
         translationLabel.stringValue = result.translation
-        replaceText = hasCorrected ? result.corrected : result.translation
+        // Replace keeps its original semantics: the corrected text when the
+        // model produced one, the translation otherwise.
+        replaceText = corrected.isEmpty ? result.translation : corrected
         replaceButton.isEnabled = replaceEnabled && !(replaceText ?? "").isEmpty
         replaceButton.toolTip = replaceEnabled ? nil : "需要辅助功能权限才能替换原文"
         correctedCaption.isHidden = !hasCorrected

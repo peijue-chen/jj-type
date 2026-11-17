@@ -42,8 +42,6 @@ enum LaunchAtLoginService {
         }
     }
 
-    static var isEnabled: Bool { state == .enabled }
-
     /// True when the bundle lives in /Applications or ~/Applications.
     /// The login item records the CURRENT bundle path, so a copy running from
     /// a build folder would be the one launched at login — the settings page

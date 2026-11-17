@@ -376,8 +376,14 @@ final class SettingsWindowController: NSWindowController {
                               target: self, action: #selector(launchAtLoginToggled(_:)))
         launchAtLoginToggle = toggle
 
-        let status = NSTextField(labelWithString: "")
+        // Wrapping label with a fixed width: a register() failure surfaces the
+        // raw SMAppService error, which is long enough to overflow the card if
+        // this were a single-line label. Same pattern as makeHint().
+        let status = NSTextField(wrappingLabelWithString: "")
         status.font = Theme.caption()
+        status.maximumNumberOfLines = 0
+        status.lineBreakMode = .byWordWrapping
+        status.widthAnchor.constraint(equalToConstant: Self.cardContentWidth - 2).isActive = true
         launchAtLoginStatusLabel = status
 
         let settingsButton = Theme.button("打开登录项设置", symbol: "arrow.up.forward.app")
@@ -386,15 +392,11 @@ final class SettingsWindowController: NSWindowController {
         settingsButton.isHidden = true
         launchAtLoginSettingsButton = settingsButton
 
-        let statusRow = NSStackView(views: [status, settingsButton])
-        statusRow.orientation = .horizontal
-        statusRow.alignment = .centerY
-        statusRow.spacing = 8
-
         let card = Theme.card()
         card.content.addArrangedSubview(makeSectionHeader("启动"))
         card.content.addArrangedSubview(toggle)
-        card.content.addArrangedSubview(statusRow)
+        card.content.addArrangedSubview(status)
+        card.content.addArrangedSubview(settingsButton)
         card.content.addArrangedSubview(
             makeHint("开启后 JJType 会随 macOS 登录自动运行，条目可在 系统设置 → 通用 → 登录项 中查看或关闭。"))
         if !LaunchAtLoginService.isInApplicationsFolder {

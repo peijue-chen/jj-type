@@ -725,7 +725,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if text.isEmpty {
                     window.showError("AI 返回为空（可能被截断），请重试或更换模型")
                 } else {
-                    window.showResult(text)
+                    // The spelling fix is display-only — the translation already
+                    // used the repaired text. Pass it only when a real
+                    // translation came back; otherwise it IS the result.
+                    window.showResult(text, corrected: result.translation.isEmpty ? "" : result.corrected)
                 }
             } catch {
                 guard !Task.isCancelled else { return }

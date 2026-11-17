@@ -36,12 +36,33 @@ enum PromptBuilder {
         """
         switch mode {
         case .translate:
-            return jsonRule + """
+            switch language {
+            case .english:
+                // ⌥D on English: translate, but repair SPELLING first so a typo
+                // never poisons the translation. Deliberately spelling-only —
+                // grammar/style rewriting stays ⌥E's job (correctAndTranslate).
+                return jsonRule + """
 
-            Task: translate the user text. "corrected" must be an empty string "".
-            "translation" is the translation: English source → Chinese;
-            Chinese or mixed source → English; any other language → Chinese.
-            """
+                Task: translate the English text into Chinese → "translation".
+                Spelling: fix ONLY misspelled words and typos in the source. Do NOT
+                rephrase, restructure or change the wording — keep the author's
+                sentence as-is apart from the misspelled words. Put the repaired
+                English in "corrected"; when there are no spelling mistakes,
+                "corrected" must be an empty string "".
+                """
+            case .chinese, .mixed:
+                return jsonRule + """
+
+                Task: translate the text into natural English → "translation".
+                "corrected" must be an empty string "".
+                """
+            case .other:
+                return jsonRule + """
+
+                Task: translate the text into Chinese → "translation".
+                "corrected" must be an empty string "".
+                """
+            }
         case .correctAndTranslate:
             switch language {
             case .english:
@@ -73,7 +94,7 @@ enum PromptBuilder {
     static func userPrompt(text: String, mode: TranslateMode) -> String {
         switch mode {
         case .translate:
-            return "Translate the following text:\n\(text)"
+            return "Translate the following text (fix spelling mistakes first when the source is English):\n\(text)"
         case .correctAndTranslate:
             return "Process the following text (correct grammar, then translate):\n\(text)"
         }

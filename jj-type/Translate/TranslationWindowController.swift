@@ -64,6 +64,22 @@ final class TranslationWindowController: NSWindowController {
     private var phoneticWorkItem: DispatchWorkItem?
     private var speechObserver: NSObjectProtocol?
 
+    /// Spelling-correction row in the input card: shown only when the AI repaired
+    /// typos in the English source. Deliberately non-destructive — the original
+    /// stays in the input box until the user taps 应用.
+    private let correctedRow = NSStackView()
+    private let correctedCaption = NSTextField(labelWithString: "拼写已纠正")
+    private let correctedLabel = NSTextField(wrappingLabelWithString: "")
+    private let applyCorrectedButton = NSButton(title: "应用", target: nil, action: nil)
+    /// Height the correction row currently adds to the window (0 while hidden).
+    /// The window grows/shrinks by exactly this much, so a row appearing after
+    /// the frame was set never squeezes the result area.
+    private var correctedRowHeight: CGFloat = 0
+    /// Text the in-flight request was started for. `showResult` compares the
+    /// correction against THIS rather than the live input box — the user may
+    /// keep typing while the request runs.
+    private var lastTranslatedText = ""
+
     /// Character count of the captured selection currently pre-filled (nil when
     /// the user typed the text) — shown so the capture source stays visible.
     private var prefillCount: Int?
@@ -187,7 +203,10 @@ final class TranslationWindowController: NSWindowController {
         }
     }
 
-    func showResult(_ translation: String) {
+    /// Renders the translation. `corrected` is the spelling-repaired English
+    /// source the model returned for an English input (empty when nothing was
+    /// fixed) — surfaced as a non-destructive note under the input.
+    func showResult(_ translation: String, corrected: String = "") {
         resultTextView.string = translation
         refreshSpeakButtons()
         setSpinner(false)
@@ -202,12 +221,74 @@ final class TranslationWindowController: NSWindowController {
         NSPasteboard.general.setString(translation, forType: .string)
         // Persist the last translation (It11 #2) — survives closes and restarts.
         LastTranslation.save(input: inputTextView.string, result: translation)
+        setCorrectedText(corrected)
     }
 
     func showError(_ message: String) {
         setSpinner(false)
         refreshSpeakButtons()
         setStatus(message, color: .systemRed, fades: true)
+    }
+
+    // MARK: - Spelling correction row
+
+    /// Shows/hides the correction row. Suppressed when the model echoed the
+    /// source unchanged or when the "correction" is just the translation —
+    /// only a genuine spelling fix earns a row.
+    private func setCorrectedText(_ text: String) {
+        let fixed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let source = lastTranslatedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let translation = resultTextView.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        let shouldShow = !fixed.isEmpty && fixed != source && fixed != translation
+        correctedLabel.stringValue = shouldShow ? fixed : ""
+        correctedLabel.toolTip = shouldShow ? fixed : nil
+        correctedRow.isHidden = !shouldShow
+        resizeForCorrectedRow()
+    }
+
+    /// Grows/shrinks the window by the correction row's height so the result
+    /// area keeps its size. The top edge stays put (the window grows downward)
+    /// and the frame is clamped to the screen.
+    private func resizeForCorrectedRow() {
+        guard let window else { return }
+        var target: CGFloat = 0
+        if !correctedRow.isHidden {
+            // A wrapping label needs an explicit wrap width before its height
+            // can be measured — the row's width is the card's inner width.
+            let inner = window.frame.width - 32 - Theme.cardPadding * 2
+            let reserved = correctedCaption.fittingSize.width
+                + applyCorrectedButton.fittingSize.width + 12
+            correctedLabel.preferredMaxLayoutWidth = max(60, inner - reserved)
+            target = max(correctedLabel.intrinsicContentSize.height,
+                         correctedCaption.fittingSize.height,
+                         applyCorrectedButton.fittingSize.height) + Theme.rowSpacing
+        }
+        let delta = target - correctedRowHeight
+        correctedRowHeight = target
+        guard abs(delta) > 0.5 else { return }
+        var frame = window.frame
+        frame.size.height += delta
+        frame.origin.y -= delta
+        if let visible = (window.screen ?? NSScreen.main)?.visibleFrame {
+            frame.origin.y = max(frame.origin.y, visible.minY)
+            frame.size.height = min(frame.size.height, visible.height)
+        }
+        window.setFrame(frame, display: true)
+    }
+
+    /// Replaces the input with the corrected English so the user can edit or
+    /// copy it. The translation already used the fixed text, so nothing is
+    /// re-translated here.
+    @objc private func applyCorrectedClicked() {
+        let corrected = correctedLabel.stringValue
+        guard !corrected.isEmpty else { return }
+        inputTextView.string = corrected
+        prefillCount = nil
+        setCorrectedText("")
+        updateInputPhonetic(debounced: false)
+        refreshSpeakButtons()
+        setStatus("已应用纠正后的原文", color: .secondaryLabelColor, fades: true)
+        window?.makeFirstResponder(inputTextView)
     }
 
     /// Single dismissal path (Esc / ⌘W / ⌘Q + outside-click).
@@ -274,6 +355,35 @@ final class TranslationWindowController: NSWindowController {
         buttonsRow.spacing = 12
         buttonsRow.alignment = .centerY
 
+        // Spelling correction row: "拼写已纠正 <fixed text> [应用]". Hidden unless
+        // the AI actually repaired a typo — the input is never overwritten
+        // without the user asking. The label truncates instead of pushing the
+        // card wider; the full text stays available as a tooltip.
+        correctedCaption.font = Theme.caption()
+        correctedCaption.textColor = Theme.accent
+        correctedLabel.font = Theme.caption()
+        correctedLabel.textColor = .secondaryLabelColor
+        correctedLabel.lineBreakMode = .byTruncatingTail
+        correctedLabel.maximumNumberOfLines = 2
+        correctedLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        applyCorrectedButton.bezelStyle = .inline
+        applyCorrectedButton.isBordered = false
+        // A borderless button's title ignores contentTintColor — tint it via
+        // the attributed title so the action reads as a link.
+        applyCorrectedButton.attributedTitle = NSAttributedString(
+            string: "应用",
+            attributes: [.font: Theme.caption(), .foregroundColor: Theme.accent])
+        applyCorrectedButton.toolTip = "用纠正后的原文替换输入框内容"
+        applyCorrectedButton.target = self
+        applyCorrectedButton.action = #selector(applyCorrectedClicked)
+        correctedRow.orientation = .horizontal
+        correctedRow.alignment = .firstBaseline
+        correctedRow.spacing = 6
+        correctedRow.addArrangedSubview(correctedCaption)
+        correctedRow.addArrangedSubview(correctedLabel)
+        correctedRow.addArrangedSubview(applyCorrectedButton)
+        correctedRow.isHidden = true
+
         // Speaker buttons + IPA label live in the card headers.
         speakInputButton.target = self
         speakInputButton.action = #selector(speakInputClicked)
@@ -297,6 +407,7 @@ final class TranslationWindowController: NSWindowController {
         let inputCard = Theme.card()
         inputCard.content.addArrangedSubview(inputHeader)
         inputCard.content.addArrangedSubview(inputScroll)
+        inputCard.content.addArrangedSubview(correctedRow)
         inputCard.content.addArrangedSubview(buttonsRow)
 
         let resultCard = Theme.card()
@@ -320,6 +431,8 @@ final class TranslationWindowController: NSWindowController {
             resultHeader.widthAnchor.constraint(
                 equalTo: resultCard.widthAnchor, constant: -Theme.cardPadding * 2),
             inputScroll.widthAnchor.constraint(
+                equalTo: inputCard.widthAnchor, constant: -Theme.cardPadding * 2),
+            correctedRow.widthAnchor.constraint(
                 equalTo: inputCard.widthAnchor, constant: -Theme.cardPadding * 2),
             resultScroll.widthAnchor.constraint(
                 equalTo: resultCard.widthAnchor, constant: -Theme.cardPadding * 2),
@@ -408,6 +521,9 @@ final class TranslationWindowController: NSWindowController {
         guard !text.isEmpty else { return }
         setLoading(true)
         resultTextView.string = ""
+        // A new request invalidates the previous correction note.
+        lastTranslatedText = text
+        setCorrectedText("")
         refreshSpeakButtons()
         onTranslate?(text)
     }
@@ -418,6 +534,7 @@ final class TranslationWindowController: NSWindowController {
         prefillCount = nil
         setStatus("", color: .secondaryLabelColor, fades: false)
         LastTranslation.clear()
+        setCorrectedText("")
         updateInputPhonetic(debounced: false)
         refreshSpeakButtons()
         window?.makeFirstResponder(inputTextView)
@@ -439,7 +556,14 @@ final class TranslationWindowController: NSWindowController {
     /// Persists the current frame with an immediate flush so even a SIGTERM
     /// kill right after a move cannot lose it.
     private func saveFrame() {
-        guard let frame = window?.frame else { return }
+        guard var frame = window?.frame else { return }
+        // The correction row grows the window programmatically (and the frame
+        // observers fire for that too). Persist the BASE size — without this
+        // every launch would reopen with a stale extra row height baked in.
+        if !correctedRow.isHidden, correctedRowHeight > 0 {
+            frame.size.height -= correctedRowHeight
+            frame.origin.y += correctedRowHeight
+        }
         UserDefaults.standard.set(NSStringFromRect(frame), forKey: Self.frameKey)
         UserDefaults.standard.synchronize()
     }
@@ -531,9 +655,12 @@ final class TranslationWindowController: NSWindowController {
 
 extension TranslationWindowController: NSTextViewDelegate {
     /// Typing updates the IPA label (debounced) and the speaker availability.
+    /// It also drops the correction note: once the source is edited, the fix
+    /// no longer describes what is in the box.
     func textDidChange(_ notification: Notification) {
         updateInputPhonetic(debounced: true)
         refreshSpeakButtons()
+        setCorrectedText("")
     }
 }
 
