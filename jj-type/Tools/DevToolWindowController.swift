@@ -9,6 +9,16 @@
 //  a 10 MB JSON never materializes its wrapper nodes until unfolded), with a
 //  tree/text segmented switch.
 //
+//  Large-document policy: both text views are TextKit 2
+//  (`NSTextView(usingTextLayoutManager:)`). TextKit 1 lays the WHOLE document
+//  out on assignment — a 6 MB / 116k-line JSON costs ~2 s per layout and
+//  re-lays out on every edit, which is what made ⌥J feel frozen. TextKit 2
+//  lays out only what is on screen, so assigning a multi-MB string stays in
+//  the millisecond range and typing/scrolling never re-lays out the document.
+//  On top of that, a tree-mode result skips the text render entirely: the
+//  document is only handed to the text view when 文本 is opened, while
+//  复制结果 / 结果 → 输入 always read the full text (`prettyText`).
+//
 //  Memory policy (user requirement): closing the window drops EVERYTHING —
 //  the AppDelegate owner nils the whole controller (`onClosed`), and the
 //  controller clears its texts and tree root beforehand, so a huge JSON
@@ -96,14 +106,23 @@ final class DevToolWindowController: NSWindowController {
     /// (memory requirement — a big JSON never survives a closed window).
     var onClosed: (() -> Void)?
 
-    private let inputTextView = NSTextView()
-    private let resultTextView = NSTextView()
+    // TextKit 2 views: layout is lazy/estimated, so assigning a multi-MB
+    // document no longer forces a full 2-million-point layout on the main
+    // thread (TextKit 1 did — that was the multi-second freeze on big JSON).
+    private let inputTextView = NSTextView(usingTextLayoutManager: true)
+    private let resultTextView = NSTextView(usingTextLayoutManager: true)
 
     // JSON tree result.
     private let outlineView = NSOutlineView()
     private var treeRoot: JSONNode?
-    /// Pretty text backing the tree (复制结果 in tree mode copies THIS).
+    /// Full text of the last transform — the AUTHORITATIVE copy/swap source.
+    /// The text view may lag behind it (see `resultTextStale`), so copy/swap
+    /// never read the view when the full document is what the user asked for.
     private var prettyText: String = ""
+    /// True while `resultTextView` does not yet show `prettyText`: a transform
+    /// that finishes in tree mode skips the text assignment entirely and the
+    /// document is filled in when 文本 is opened.
+    private var resultTextStale = false
 
     private let jsonPrettyButton = Theme.button("格式化", symbol: "increase.indent")
     private let jsonMinifyButton = Theme.button("压缩", symbol: "decrease.indent")
@@ -212,6 +231,7 @@ final class DevToolWindowController: NSWindowController {
         resultTextView.string = ""
         treeRoot = nil
         prettyText = ""
+        resultTextStale = false
         outlineView.reloadData()
     }
 
@@ -413,6 +433,11 @@ final class DevToolWindowController: NSWindowController {
             viewModeControl.setSelected(false, forSegment: 0)
             viewModeControl.setSelected(true, forSegment: 1)
         }
+        // Fill the text view on first display instead of at transform time.
+        if !tree, resultTextStale {
+            resultTextView.string = prettyText
+            resultTextStale = false
+        }
     }
 
     /// Expands every branch recursively — materializes ALL lazy wrappers, so
@@ -507,37 +532,80 @@ final class DevToolWindowController: NSWindowController {
             setStatus("请先输入内容", color: .systemRed)
             return
         }
-        let result = Self.apply(transform, to: input)
-        if let output = result.output {
-            resultTextView.string = output
-            copyResultButton.isEnabled = true
-            swapButton.isEnabled = true
-
-            if transform == .jsonPretty, let object = result.object {
-                // Tree mode: root node only — branches build lazily on expand.
-                treeRoot = JSONNode(key: nil, value: object)
-                prettyText = output
-                outlineView.reloadData()
-                outlineView.expandItem(nil)
-                viewModeControl.setSelected(true, forSegment: 0)
-                viewModeControl.setSelected(false, forSegment: 1)
-                applyViewMode()
-                setStatus("JSON 格式化完成 · \(output.count) 字符（树形可折叠）",
-                          color: .secondaryLabelColor)
-            } else {
-                treeRoot = nil
-                prettyText = output
-                outlineView.reloadData()
-                viewModeControl.setSelected(false, forSegment: 0)
-                viewModeControl.setSelected(true, forSegment: 1)
-                applyViewMode()
-                setStatus("\(transform.displayName)完成 · \(output.count) 字符",
-                          color: .secondaryLabelColor)
+        // Parse + serialize run OFF the main thread: a multi-MB document costs
+        // real time and must never freeze the window. The result is applied
+        // back on main (AppKit is main-only).
+        setStatus("\(transform.displayName)处理中…", color: .secondaryLabelColor)
+        setTransformButtonsEnabled(false)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = Self.apply(transform, to: input)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.setTransformButtonsEnabled(true)
+                self.present(result: result, transform: transform)
             }
-        } else {
+        }
+    }
+
+    /// Applies a finished transform to the UI. Split out of `transformClicked`
+    /// so the heavy work can happen on a background queue.
+    private func present(result: (output: String?, error: String?, object: Any?),
+                         transform: Transform) {
+        guard let output = result.output else {
             setStatus("\(transform.displayName)失败：\(result.error ?? "未知错误")",
                       color: .systemRed)
+            return
         }
+        copyResultButton.isEnabled = true
+        swapButton.isEnabled = true
+
+        // The text view is marked stale FIRST: `applyViewMode` fills it only
+        // when 文本 is the visible mode, so a tree-mode result never pays a
+        // text render nobody is looking at. `prettyText` already holds the
+        // full output, so 复制结果 / 结果 → 输入 never depend on the view.
+        resultTextStale = true
+        if transform == .jsonPretty, let object = result.object {
+            // Tree mode: root node only — branches build lazily on expand.
+            treeRoot = JSONNode(key: nil, value: object)
+            prettyText = output
+            outlineView.reloadData()
+            outlineView.expandItem(nil)
+            viewModeControl.setSelected(true, forSegment: 0)
+            viewModeControl.setSelected(false, forSegment: 1)
+            applyViewMode()
+            setStatus("JSON 格式化完成 · \(Self.sizeText(output))（树形可折叠）",
+                      color: .secondaryLabelColor)
+        } else {
+            treeRoot = nil
+            prettyText = output
+            outlineView.reloadData()
+            viewModeControl.setSelected(false, forSegment: 0)
+            viewModeControl.setSelected(true, forSegment: 1)
+            applyViewMode()
+            setStatus("\(transform.displayName)完成 · \(Self.sizeText(output))",
+                      color: .secondaryLabelColor)
+        }
+    }
+
+    private func setTransformButtonsEnabled(_ enabled: Bool) {
+        for button in [jsonPrettyButton, jsonMinifyButton, jsonToStringButton,
+                       stringToJsonButton, base64EncodeButton, base64DecodeButton,
+                       uriEncodeButton, uriDecodeButton] {
+            button.isEnabled = enabled
+        }
+    }
+
+    /// Human-readable size. `String.count` walks every grapheme cluster (slow
+    /// on multi-MB text); `utf8.count` is O(1) and good enough for a status.
+    private static func sizeText(_ text: String) -> String {
+        let bytes = text.utf8.count
+        if bytes >= 1_048_576 {
+            return String(format: "%.1f MB", Double(bytes) / 1_048_576)
+        }
+        if bytes >= 1024 {
+            return String(format: "%.0f KB", Double(bytes) / 1024)
+        }
+        return "\(bytes) 字节"
     }
 
     /// Pure string transforms — no state, safe to call from anywhere.
@@ -630,10 +698,10 @@ final class DevToolWindowController: NSWindowController {
     // MARK: - Result actions
 
     @objc private func copyResultClicked() {
-        // Tree mode copies the pretty text (identical to the text view).
-        let text = treeAvailable && viewModeControl.selectedSegment == 0
-            ? prettyText
-            : resultTextView.string
+        // Always the full document, never the view: in tree mode the view may
+        // not have been filled yet, and a truncated render must never leak
+        // into the clipboard.
+        let text = prettyText
         guard !text.isEmpty else { return }
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
@@ -643,9 +711,8 @@ final class DevToolWindowController: NSWindowController {
 
     /// Puts the result back into the input box for chained conversions.
     @objc private func swapClicked() {
-        let text = treeAvailable && viewModeControl.selectedSegment == 0
-            ? prettyText
-            : resultTextView.string
+        // Same rule as copy: the full document, not whatever the view shows.
+        let text = prettyText
         guard !text.isEmpty else { return }
         inputTextView.string = text
         window?.makeFirstResponder(inputTextView)
