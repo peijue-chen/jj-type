@@ -27,7 +27,9 @@ The AI pipeline is the core of JJType: grab the user's selected text, translate 
 
 `PromptBuilder` (`jj-type/Core/PromptBuilder.swift`) builds **English system prompts enforcing a strict JSON output contract** `{"corrected": "...", "translation": "..."}`, branching on mode × language:
 
-- `.translate`: English → Chinese; Chinese/mixed → English; other → Chinese.
+- `.translate` + English (1.10.0): **spelling repair** — fix ONLY misspelled words in the source into `corrected`, translate to Chinese into `translation`. No grammar/style rewriting (that stays `.correctAndTranslate`'s job). When no spelling mistakes exist, `corrected` is an empty string `""`.
+- `.translate` + Chinese/mixed: translate to English into `translation`, `corrected` empty.
+- `.translate` + other: translate to Chinese into `translation`, `corrected` empty.
 - `.correctAndTranslate` + English: correct grammar into `corrected`, translate to Chinese.
 - `.correctAndTranslate` + Chinese/mixed/other: correction skipped (empty `corrected`), translate to English/Chinese.
 
@@ -38,9 +40,11 @@ Parsing (`PromptBuilder.parse`) strips thinking tags and code fences, then scans
 `AIClient` (`jj-type/Core/AIClient.swift`) POSTs `{baseURL}/chat/completions`, non-streaming, temperature 0.2, 30 s timeout, through a single shared ephemeral `URLSession`. Notable behaviors:
 
 - **`response_format: json_object` with a 400 fallback** — strict OpenAI-compatible servers may reject JSON mode; `attempt()` retries without it on HTTP 400.
-- **Reasoning-model support**: if `content` is empty, it pulls the last valid JSON from `reasoning_content` (GLM/DeepSeek-style models put output there). Raw thinking text is never returned.
+- **`jsonMode` parameter (1.10.0)**: the pipeline caller controls whether JSON mode is forced. Quick-action prompts MUST pass `jsonMode: false` — forcing JSON mode onto a "output only the text" instruction made long selections return truncated or multi-key JSON that the plain-text extractor could not recover.
+- **Reasoning-model support**: if `content` is empty, it pulls the last valid JSON from `reasoning_content` (GLM/DeepSeek-style models put output there). Raw thinking text is never returned. In JSON mode only, it extracts the last valid JSON object inside the reasoning content; without JSON mode, it falls through to an empty result.
 - **Truncation retry**: on `finish_reason == "length"` with empty text, retries once at doubled `max_tokens` (8192) before throwing `AIError.noValidResult(truncated: true)`.
 - **Connection test**: `testConnection` sends "Reply with exactly: OK", 10 s timeout, no JSON mode — used by the Settings provider form.
+- **Diagnostic logging**: every request/response is recorded to `~/Library/Logs/JJType/ai.log` (256 KB rotation) via `DiagnosticLog.note()` — same convention as `FinderTerminal.note()`. This is the only durable trace for release builds whose NSLog does not reach the unified log.
 
 Errors surface as localized Chinese messages (`AIError` in `AIClient.swift`).
 
@@ -52,6 +56,8 @@ Errors surface as localized Chinese messages (`AIError` in `AIClient.swift`).
 ## Quick actions
 
 `QuickAction` (`jj-type/SelectionAction/QuickAction.swift`) models AI quick actions with a `{text}` template placeholder (absent placeholder → text appended). Three built-ins (翻译 / 润色 / 改写) carry **fixed UUIDs** — the last UUID group must be exactly 12 hex digits; the earlier 13-digit format crashed launch and was fixed in 1.6.0. Built-ins are seeded into the persisted `aiActions` list so prompts are editable but not deletable. `runQuickAction` uses `lastCapturedSourceText` and renders through the same result panel.
+
+**Plain-text extraction (1.10.0)**: `PromptBuilder.extractPlainText` unwraps weak-model JSON padding into the answer using a `plainAnswerKeys` preference list (`translation`, `corrected`, `text`, `result`, `output`, `response`, `answer`, `content`, `rewritten_text`, `polished_text`, `corrected_text`). Multi-entry objects with a known answer key yield the value — no longest-value guessing, so actions whose legitimate OUTPUT is JSON (polishing/rewriting a JSON snippet) are never mangled.
 
 ## Trigger wiring
 

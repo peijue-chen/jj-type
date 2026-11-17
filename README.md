@@ -120,7 +120,6 @@ Alfred 风格的快速启动：
 
 预编译版本放在仓库的 [apps/](apps/) 目录，按版本号分文件夹：
 
-- 最新版本（1.10.0）：[apps/1.10.0/JJType.app](apps/1.10.0/JJType.app)
 - 历史版本：浏览 [apps/](apps/) 目录
 
 ## 安装

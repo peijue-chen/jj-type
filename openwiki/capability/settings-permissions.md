@@ -10,7 +10,7 @@ timestamp: "2026-11-05T10:32:00+08:00"
 
 ## Settings window
 
-`SettingsWindowController` (`jj-type/Settings/SettingsWindowController.swift`, ~74 KB, the largest file) reproduces macOS System Settings: a translucent **sidebar** (208 pt) with tinted `IconTileView` rows + one card-based page per section (540 pt): **AI 服务 / 快捷键 / 快捷启动 / 终端 / 截图 / 划词动作**. Page title/subtitle swap on selection; the window re-fits on page switch; a shared footer renders the bundle version (`JJType 1.8.0 (33)` style) from `CFBundleShortVersionString`/`CFBundleVersion`.
+`SettingsWindowController` (`jj-type/Settings/SettingsWindowController.swift`, ~74 KB, the largest file) reproduces macOS System Settings: a translucent **sidebar** (208 pt) with tinted `IconTileView` rows + one card-based page per section (540 pt): **通用 / AI 服务 / 快捷键 / 快捷启动 / 终端 / 截图 / 划词动作**. Page title/subtitle swap on selection; the window re-fits on page switch; a shared footer renders the bundle version (`JJType 1.8.0 (33)` style) from `CFBundleShortVersionString`/`CFBundleVersion`.
 
 Each page is a vertical stack of `Theme.card()` groups. All three edit forms (AI providers / launch items / quick actions) **start hidden** and appear only on 新建 or row selection.
 
@@ -20,6 +20,14 @@ Each page is a vertical stack of `Theme.card()` groups. All three edit forms (AI
 - **`editingAIActionId`** — the quick-action editor is bound the same way; built-ins (fixed UUIDs) are editable but not deletable (enforced in `SettingsStore.deleteAIAction`); the form stays hidden until 新建/selection.
 - **Provider deletion asks first** — the Keychain key goes with the provider and is unrecoverable; delete always confirms.
 - **`HotkeyRecorderView`** stores ONLY ⌘/⌥/⌃/⇧ modifiers — CapsLock/Fn/numericPad would make two identical combos compare unequal and defeat conflict detection. Built-in hotkey conflicts are also checked against launch items, and ⌥Space is deliberately rejected (Alfred).
+
+### 通用 page — launch at login (1.9.0)
+
+The 通用 settings page provides the launch-at-login toggle. It is backed by `LaunchAtLoginService` (`jj-type/Core/LaunchAtLoginService.swift`) which wraps `SMAppService.mainApp` — the system login items database is the single source of truth. Four states render differently: `.enabled`, `.notRegistered`, `.requiresApproval` (user turned it off in System Settings), and `.unavailable`. The page warns if the app is not in `/Applications` (the login item records the current bundle path). Registration errors surface verbatim in red text.
+
+### Accent color (1.9.0)
+
+The interface accent color was changed from the system highlight color (default blue) to `Theme.accent` — the indigo→violet gradient from the app icon. Affected elements: result panel labels and buttons, translation window primary button, settings primary buttons/hotkey values/selected rows, capture toolbar and selection frame, eyedropper background.
 
 ## Theme design system
 
@@ -52,3 +60,5 @@ All guides' 打开系统设置 tries the modern `x-apple.systempreferences:…` 
 ## Selection bar (划词动作)
 
 `SelectionActionBarController` is the PopClip-style chip bar: a global mouseDown monitor records the drag origin (both endpoints via `NSEvent.mouseLocation` — `locationInWindow` is window-relative in global monitors); a mouseUp ≥12 pt away runs the full capture chain (AX-first + synthetic-⌘C fallback) and shows chips (复制 / every quick action / 二维码) under the cursor. Every chip dismisses the bar before running; any outside mouseDown, Esc, or a new selection dismisses it. Enabled by default via settings toggle; it needs no permission for mouse monitors, but reading selection via AX does — a missing grant surfaces the Accessibility guide. The bar and the result panel are mutually exclusive (`AppDelegate` dismisses the bar before showing the panel).
+
+A **dedicated keyboard shortcut** (default ⌥S) can show the bar manually (1.8.1) — useful in browsers/Electron apps where passive selection detection cannot read the selected text. When the "快捷键直接翻译" setting is enabled (1.9.0), ⌥S skips the bar entirely and translates the selection directly.

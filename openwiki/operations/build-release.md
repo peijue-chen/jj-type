@@ -21,14 +21,14 @@ timestamp: "2026-11-05T10:34:00+08:00"
 # Debug (shared scheme lives in jj-type.xcodeproj/xcshareddata/)
 xcodebuild -project jj-type.xcodeproj -scheme jj-type -configuration Debug build
 
-# Release + timestamped app copy → apps/JJType-<timestamp>.app (uses ./build derived data)
+# Release + versioned app copy → apps/<version>/JJType.app (uses ./build derived data)
 ./build-release.sh
 
 # Same build with the raw, unfiltered xcodebuild log (thousands of lines)
 VERBOSE=1 ./build-release.sh
 ```
 
-`build-release.sh` (`/build-release.sh`) builds a **universal binary (x86_64 + arm64)** via script-only `ARCHS="x86_64 arm64" ONLY_ACTIVE_ARCH=NO` overrides — `project.pbxproj` stays host-arch so Xcode dev builds remain fast. It uses `-destination 'generic/platform=macOS'` (required, otherwise "multiple matching destinations") and prints a readable filtered log by default: version banner, per-arch compile progress, signing, warnings/errors verbatim, elapsed time, and the product path — never `-quiet`, which makes a successful build look like nothing happened. Output goes to `apps/<YYYYMMDD-HHMM>/JJType.app`.
+`build-release.sh` (`/build-release.sh`) builds a **universal binary (x86_64 + arm64)** via script-only `ARCHS="x86_64 arm64" ONLY_ACTIVE_ARCH=NO` overrides — `project.pbxproj` stays host-arch so Xcode dev builds remain fast. It uses `-destination 'generic/platform=macOS'` (required, otherwise "multiple matching destinations") and prints a readable filtered log by default: version banner, per-arch compile progress, signing, warnings/errors verbatim, elapsed time, and the product path — never `-quiet`, which makes a successful build look like nothing happened. Output goes to `apps/<version>/JJType.app` (version folder, not timestamp).
 
 **Signing:** `CODE_SIGN_STYLE = Automatic` + `CODE_SIGN_IDENTITY = "Apple Development"` + personal `DEVELOPMENT_TEAM = 36RXHYW79N` (requires that team's cert on the machine). Publish/notarization is pending a channel decision — do not switch back to ad-hoc `-` without user approval.
 
@@ -46,7 +46,7 @@ Every code change ships with a version bump AND a `CHANGELOG.md` entry. Do not b
 - **`CHANGELOG.md`**: newest release on top, `## [x.y.z] — YYYY-MM-DD`, grouped `Added` / `Changed` / `Fixed` / `Removed`. Write what the user sees (Chinese, like the UI), not the diff.
 - **Procedure for any behavior-changing task:** pick the bump → update `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` → add the CHANGELOG section → build → done. A CHANGELOG entry without the matching build-setting change (or the reverse) is a defect.
 
-Release history at a glance (CHANGELOG.md): 1.0 baseline menu-bar translation → 1.1 settings footer + Swift 6 concurrency fixes → 1.2 launcher + quick-launch → 1.3 search fallbacks + index TTL → 1.4 system commands + empty-trash fallback chain → 1.5 Finder toolbar terminal + automation guide → 1.6 selection bar, clipboard history, QR, eyedropper, keep-awake, quick AI actions → 1.7 visual overhaul + feature-folder source reorg → 1.8 dev tool window, clipboard single-item delete, startup speed, Finder terminal root-cause fix (NSAppleEventsUsageDescription).
+Release history at a glance (CHANGELOG.md): 1.0 baseline menu-bar translation → 1.1 settings footer + Swift 6 concurrency fixes → 1.2 launcher + quick-launch → 1.3 search fallbacks + index TTL → 1.4 system commands + empty-trash fallback chain → 1.5 Finder toolbar terminal + automation guide → 1.6 selection bar, clipboard history, QR, eyedropper, keep-awake, quick AI actions → 1.7 visual overhaul + feature-folder source reorg → 1.8 dev tool window, clipboard single-item delete, startup speed, Finder terminal root-cause fix (NSAppleEventsUsageDescription) → 1.9 TTS/phonetic/accent color/launch-at-login → 1.10 in-prompt spelling repair for translations, DevToolWindow TextKit 2 large-document optimization.
 
 ## App icon pipeline
 

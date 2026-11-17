@@ -61,7 +61,7 @@ Settings are split by sensitivity:
 
 - **UserDefaults (`jjtype.*` keys)** — `SettingsStore` (`jj-type/Core/SettingsStore.swift`) persists providers, active provider id, per-action hotkeys, launch items, AI quick actions, capture save directory/format, color-picker history (capped 12), selection-bar toggle, preferred terminal, and guidance flags. Window frames are persisted under explicit keys (`jjtype.translationWindowFrame`, `jjtype.qrWindowFrame`).
 - **Keychain** — `KeychainStore` (`jj-type/Core/KeychainStore.swift`) stores API keys only, service `com.aigens.jj-type.provider`, account = provider UUID. Keys never touch UserDefaults. Deleting a provider asks first because the Keychain key is unrecoverable.
-- **Files** — clipboard history persists to `~/Library/Application Support/JJType/ClipboardHistory/` (`index.json` + `<uuid>.png`); screenshots save to `~/Pictures/JJType/`; the Finder-terminal diagnostic log goes to `~/Library/Logs/JJType/finder-terminal.log` (256 KB rotation).
+- **Files** — clipboard history persists to `~/Library/Application Support/JJType/ClipboardHistory/` (`index.json` + `<uuid>.png`); screenshots save to `~/Pictures/JJType/`; the Finder-terminal diagnostic log goes to `~/Library/Logs/JJType/finder-terminal.log` (256 KB rotation); AI diagnostics go to `~/Library/Logs/JJType/ai.log` (256 KB rotation, same convention via `DiagnosticLog` in `jj-type/Core/DiagnosticLog.swift`).
 
 Change propagation is callback-driven: `SettingsStore.onProvidersChanged` rebuilds the menu, `onHotkeyChanged`/`onLaunchItemsChanged` re-register hotkeys, and `KeepAwakeService.onChanged` refreshes the status icon/menu section.
 
@@ -71,7 +71,9 @@ Change propagation is callback-driven: `SettingsStore.onProvidersChanged` rebuil
 jj-type/
   App/            main.swift, AppDelegate.swift (integration spine)
   Core/           AIClient, PromptBuilder, LanguageRouter, HotkeyManager,
-                  SettingsStore, KeychainStore, TextCaptureService
+                  SettingsStore, KeychainStore, TextCaptureService,
+                  SpeechService, PhoneticService, LaunchAtLoginService,
+                  DiagnosticLog
   Translate/      ResultPanelController, TranslationWindowController
   Launcher/       LauncherWindowController, LaunchItem, SystemCommand,
                   FinderTerminal, AppIndex

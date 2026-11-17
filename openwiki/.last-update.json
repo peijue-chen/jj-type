@@ -1,7 +1,6 @@
 {
-  "project": "jj-type",
-  "updatedAt": "2026-11-05T10:35:00+08:00",
-  "version": "1.8.0 (33)",
-  "headCommit": "5163220f01d6c8a362e5aa70a34b2d08ad2c9247",
-  "note": "Initial wiki generation. Covered architecture (overview + AI pipeline), capabilities (launcher, tools, screen capture, settings/permissions), and operations (build/versioning/CI). Uncommitted working-tree changes: AGENTS.md OpenWiki section (pending), .github/, CLAUDE.md, openwiki/."
+  "updatedAt": "2026-11-17T07:57:03.436Z",
+  "command": "update",
+  "gitHead": "4abf8c3646659f60913e2e3d5972d1dfeacd7a8d",
+  "model": "openrouter/deepseek/deepseek-v4-flash"
 }
