@@ -1,13 +1,12 @@
 #!/bin/bash
-# Builds the Release .app and copies it to apps/<timestamp>/JJType.app
-# (app keeps its name; the timestamped FOLDER identifies the build)
+# Builds the Release .app and copies it to apps/<version>/JJType.app
+# (app keeps its name; the version FOLDER is the stable download location)
 #
 # Output: progress + warnings/errors by default; `VERBOSE=1 ./build-release.sh`
 # streams the raw xcodebuild log (every CompileSwift / CodeSign line).
 set -euo pipefail
 cd "$(dirname "$0")"
 
-STAMP="$(date +%Y%m%d-%H%M)"
 BUILD_DIR="./build"
 START=$SECONDS
 
@@ -72,10 +71,10 @@ if [ ! -d "$SRC" ]; then
 fi
 
 echo "==> 复制产物…"
-mkdir -p "apps/${STAMP}"
-rm -rf "apps/${STAMP}/JJType.app"
-cp -R "$SRC" "apps/${STAMP}/JJType.app"
-echo "Built: apps/${STAMP}/JJType.app ($((SECONDS - START))s)"
+mkdir -p "apps/${VERSION}"
+rm -rf "apps/${VERSION}/JJType.app"
+cp -R "$SRC" "apps/${VERSION}/JJType.app"
+echo "Built: apps/${VERSION}/JJType.app ($((SECONDS - START))s)"
 
 # open
-open "./apps/${STAMP}/"
+open "./apps/${VERSION}/"

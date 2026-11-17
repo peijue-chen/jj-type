@@ -1,5 +1,5 @@
 # Build outputs of build-release.sh
-apps/
+# apps/ is committed on purpose: it is the download location for releases.
 build/
 
 # Xcode user state
