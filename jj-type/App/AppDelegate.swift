@@ -24,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let aiClient = AIClient()
     private let captureOverlay = CaptureOverlayController()
     private let keepAwake = KeepAwakeService()
+    private let inputSourceKeeper = InputSourceKeeper.shared
 
     private var resultPanel: ResultPanelController?
     private var translationWindow: TranslationWindowController?
@@ -84,6 +85,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Clipboard recording runs for the whole session; the panel reads the
         // current entries each time it opens.
         ClipboardHistoryService.shared.start()
+
+        // Input-source keeper: restores the saved preference and starts the
+        // observers. It stays inert unless a Sogou input source is actually
+        // installed AND enabled — refreshStatus() decides that.
+        inputSourceKeeper.onChanged = { [weak self] in
+            MainActor.assumeIsolated { self?.rebuildStatusMenu() }
+        }
+        inputSourceKeeper.setMode(settingsStore.inputSourceKeeperMode)
+        if settingsStore.inputSourceKeeperEnabled {
+            inputSourceKeeper.setEnabled(true)
+        } else {
+            inputSourceKeeper.refreshStatus()
+        }
+        // Re-scan when the app is activated: the user may have just installed
+        // or enabled Sogou in System Settings. A status change fires onChanged,
+        // which rebuilds the menu.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.inputSourceKeeper.refreshStatus()
+            }
+        }
 
         // PopClip-style selection bar (utils-7): appears on drag-selection.
         let selectionBar = SelectionActionBarController.shared
@@ -296,6 +322,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(withTitle: "开发工具  \(settingsStore.devToolHotkey.displayText)",
                      action: #selector(openDevToolWindow), keyEquivalent: "").target = self
         menu.addItem(keepAwakeMenuItem())
+        menu.addItem(inputSourceMenuItem())
 
         if !settingsStore.launchItems.isEmpty {
             let parent = NSMenuItem(title: "快捷启动", action: nil, keyEquivalent: "")
@@ -441,6 +468,88 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func stopKeepAwake() {
         keepAwake.disable()
+    }
+
+    // MARK: - Input source keeper
+
+    /// 「输入法」submenu: enable toggle, correction mode, live status and a
+    /// shortcut to the system keyboard pane. The keeper stays inert when no
+    /// Sogou input source is installed — the submenu says so instead of
+    /// offering a toggle that would do nothing.
+    private func inputSourceMenuItem() -> NSMenuItem {
+        let keeper = inputSourceKeeper
+        let title: String
+        if keeper.isEnabled, keeper.status.isReady {
+            title = "输入法 · 保持搜狗"
+        } else {
+            title = "输入法"
+        }
+        let parent = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+
+        let toggle = NSMenuItem(title: "保持搜狗输入法", action: #selector(toggleInputSourceKeeper(_:)),
+                                keyEquivalent: "")
+        toggle.target = self
+        toggle.state = keeper.isEnabled ? .on : .off
+        // An enabled keeper stays toggleable so it can always be turned off,
+        // even after Sogou has been uninstalled.
+        toggle.isEnabled = keeper.status.isReady || keeper.isEnabled
+        submenu.addItem(toggle)
+
+        submenu.addItem(.separator())
+        for mode in InputSourceKeeperMode.allCases {
+            let item = NSMenuItem(title: mode.title, action: #selector(setInputSourceKeeperMode(_:)),
+                                  keyEquivalent: "")
+            item.target = self
+            item.representedObject = mode.rawValue
+            item.state = keeper.mode == mode ? .on : .off
+            item.isEnabled = keeper.status.isReady
+            submenu.addItem(item)
+        }
+
+        submenu.addItem(.separator())
+        let status = NSMenuItem(title: keeper.status.summary, action: nil, keyEquivalent: "")
+        status.isEnabled = false
+        submenu.addItem(status)
+        if let current = keeper.currentSourceName {
+            let currentItem = NSMenuItem(title: "当前：\(current)", action: nil, keyEquivalent: "")
+            currentItem.isEnabled = false
+            submenu.addItem(currentItem)
+        }
+        if !keeper.status.isReady {
+            let open = NSMenuItem(title: "打开输入法设置…", action: #selector(openKeyboardSettings),
+                                  keyEquivalent: "")
+            open.target = self
+            submenu.addItem(open)
+        }
+
+        parent.submenu = submenu
+        return parent
+    }
+
+    @objc private func toggleInputSourceKeeper(_ sender: NSMenuItem) {
+        let enabled = !inputSourceKeeper.isEnabled
+        settingsStore.inputSourceKeeperEnabled = enabled
+        inputSourceKeeper.setEnabled(enabled)
+        rebuildStatusMenu()
+    }
+
+    @objc private func setInputSourceKeeperMode(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let mode = InputSourceKeeperMode(rawValue: raw) else { return }
+        settingsStore.inputSourceKeeperMode = mode
+        inputSourceKeeper.setMode(mode)
+        rebuildStatusMenu()
+    }
+
+    @objc private func openKeyboardSettings() {
+        let urls = [
+            "x-apple.systempreferences:com.apple.Keyboard-Settings.extension",
+            "x-apple.systempreferences:com.apple.preference.keyboard",
+        ]
+        for raw in urls {
+            if let url = URL(string: raw), NSWorkspace.shared.open(url) { return }
+        }
     }
 
     // MARK: - Clipboard history

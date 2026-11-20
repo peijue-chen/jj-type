@@ -54,6 +54,10 @@ final class SettingsWindowController: NSWindowController {
                  symbol: "textformat",
                  colors: [NSColor(red: 0.05, green: 0.62, blue: 0.58, alpha: 1),
                           NSColor(red: 0.14, green: 0.80, blue: 0.74, alpha: 1)]),
+        PageSpec(title: "输入法", subtitle: "保持第三方输入法不被系统切走",
+                 symbol: "keyboard.badge.ellipsis",
+                 colors: [NSColor(red: 0.20, green: 0.62, blue: 0.52, alpha: 1),
+                          NSColor(red: 0.42, green: 0.82, blue: 0.70, alpha: 1)]),
     ]
 
     // MARK: - Chrome
@@ -144,6 +148,14 @@ final class SettingsWindowController: NSWindowController {
     /// The tools-page hint quotes the current selection-bar shortcut.
     private var selectionBarHintLabel: NSTextField?
 
+    // MARK: - Input source page (保持搜狗输入法)
+
+    private var inputSourceKeeperToggle: NSButton?
+    private var inputSourceKeeperModePopup: NSPopUpButton?
+    private var inputSourceKeeperStatusLabel: NSTextField?
+    private var inputSourceKeeperCurrentLabel: NSTextField?
+    private weak var inputSourcePage: NSStackView?
+
     // MARK: - General page (开机自启)
 
     /// Kept so page switches / window re-activation can re-read the system
@@ -178,7 +190,7 @@ final class SettingsWindowController: NSWindowController {
         buildChrome(in: content)
         pages = [makeGeneralPage(), makeProvidersPage(), makeHotkeyPage(),
                  makeLaunchPage(), makeTerminalPage(), makeCapturePage(),
-                 makeToolsPage()]
+                 makeToolsPage(), makeInputSourcePage()]
         reloadTable()
         reloadForm()
         reloadLaunchTable()
@@ -964,6 +976,129 @@ final class SettingsWindowController: NSWindowController {
         setForm(aiActionFormContainer, hidden: true)
     }
 
+    // MARK: - Page 7: 输入法 — keep a third-party IME selected
+
+    private func makeInputSourcePage() -> NSStackView {
+        let toggle = NSButton(checkboxWithTitle: "保持搜狗输入法",
+                              target: self, action: #selector(inputSourceKeeperToggled(_:)))
+        toggle.state = store.inputSourceKeeperEnabled ? .on : .off
+        inputSourceKeeperToggle = toggle
+
+        let modePopup = NSPopUpButton()
+        for mode in InputSourceKeeperMode.allCases {
+            modePopup.addItem(withTitle: mode.title)
+        }
+        modePopup.target = self
+        modePopup.action = #selector(inputSourceKeeperModeChanged(_:))
+        pinFieldWidth(modePopup, width: 200)
+        inputSourceKeeperModePopup = modePopup
+
+        let status = NSTextField(wrappingLabelWithString: "")
+        status.font = Theme.caption()
+        status.textColor = .secondaryLabelColor
+        status.maximumNumberOfLines = 0
+        status.widthAnchor.constraint(equalToConstant: Self.cardContentWidth - 2).isActive = true
+        inputSourceKeeperStatusLabel = status
+
+        let current = NSTextField(wrappingLabelWithString: "")
+        current.font = Theme.caption()
+        current.textColor = .tertiaryLabelColor
+        current.maximumNumberOfLines = 0
+        current.widthAnchor.constraint(equalToConstant: Self.cardContentWidth - 2).isActive = true
+        inputSourceKeeperCurrentLabel = current
+
+        let openSettings = Theme.button("打开输入法设置", symbol: "arrow.up.forward.app")
+        openSettings.target = self
+        openSettings.action = #selector(openKeyboardSettings)
+
+        let formGrid = makeFormGrid([
+            ("纠正时机", modePopup),
+            ("系统设置", openSettings),
+        ])
+
+        let card = Theme.card()
+        card.content.addArrangedSubview(makeSectionHeader("保持输入法"))
+        card.content.addArrangedSubview(toggle)
+        card.content.addArrangedSubview(formGrid)
+        card.content.addArrangedSubview(status)
+        card.content.addArrangedSubview(current)
+        card.content.addArrangedSubview(
+            makeHint("macOS 会按 App 记住上次用的输入法，切走再回来常常变回 ABC。开启后 JJType 会在切换 App 时把输入法切回搜狗。"))
+        card.content.addArrangedSubview(
+            makeHint("「切换 App 时纠正」不会干扰你在同一个 App 里手动切换；「始终纠正」会在任何时刻把输入法拉回搜狗。"))
+        card.content.addArrangedSubview(
+            makeHint("纠正会延迟约 0.3 秒执行：立即切回会让搜狗在「停用未完成」时被重新激活，导致它卡在英文模式、Shift 切不回中文。"))
+
+        let page = makePage([card])
+        inputSourcePage = page
+        refreshInputSourceState()
+        return page
+    }
+
+    /// Re-reads the keeper state and repaints the page. Called on page build,
+    /// on page switch, and whenever the keeper reports a change.
+    private func refreshInputSourceState() {
+        let keeper = InputSourceKeeper.shared
+        keeper.refreshStatus()
+
+        inputSourceKeeperToggle?.state = keeper.isEnabled ? .on : .off
+        if let index = InputSourceKeeperMode.allCases.firstIndex(of: keeper.mode) {
+            inputSourceKeeperModePopup?.selectItem(at: index)
+        }
+
+        switch keeper.status {
+        case .ready(let name):
+            inputSourceKeeperStatusLabel?.stringValue = "✓ 已检测到 \(name)"
+            inputSourceKeeperStatusLabel?.textColor = .secondaryLabelColor
+        case .installedButDisabled:
+            inputSourceKeeperStatusLabel?.stringValue = "! 已安装搜狗输入法，但系统尚未启用它。请到「系统设置 → 键盘 → 输入法」添加。"
+            inputSourceKeeperStatusLabel?.textColor = .systemOrange
+        case .notInstalled:
+            inputSourceKeeperStatusLabel?.stringValue = "未检测到搜狗输入法。安装后回到本页即可启用。"
+            inputSourceKeeperStatusLabel?.textColor = .secondaryLabelColor
+        }
+
+        if let current = keeper.currentSourceName {
+            inputSourceKeeperCurrentLabel?.stringValue = "当前输入法：\(current)"
+        } else {
+            inputSourceKeeperCurrentLabel?.stringValue = ""
+        }
+
+        // The keeper is inert without a ready target — say so instead of
+        // letting the checkbox look like it is doing something. An already
+        // enabled keeper stays toggleable so the user can always turn it off
+        // (e.g. after uninstalling Sogou).
+        let ready = keeper.status.isReady
+        inputSourceKeeperToggle?.isEnabled = ready || keeper.isEnabled
+        inputSourceKeeperModePopup?.isEnabled = ready && keeper.isEnabled
+    }
+
+    @objc private func inputSourceKeeperToggled(_ sender: NSButton) {
+        let enabled = sender.state == .on
+        store.inputSourceKeeperEnabled = enabled
+        InputSourceKeeper.shared.setEnabled(enabled)
+        refreshInputSourceState()
+    }
+
+    @objc private func inputSourceKeeperModeChanged(_ sender: NSPopUpButton) {
+        let index = sender.indexOfSelectedItem
+        guard index >= 0, index < InputSourceKeeperMode.allCases.count else { return }
+        let mode = InputSourceKeeperMode.allCases[index]
+        store.inputSourceKeeperMode = mode
+        InputSourceKeeper.shared.setMode(mode)
+        refreshInputSourceState()
+    }
+
+    @objc private func openKeyboardSettings() {
+        let urls = [
+            "x-apple.systempreferences:com.apple.Keyboard-Settings.extension",
+            "x-apple.systempreferences:com.apple.preference.keyboard",
+        ]
+        for raw in urls {
+            if let url = URL(string: raw), NSWorkspace.shared.open(url) { return }
+        }
+    }
+
     // MARK: - Page switching
 
     private func selectPage(_ index: Int) {
@@ -983,6 +1118,10 @@ final class SettingsWindowController: NSWindowController {
         if generalPage != nil, pages[index] === generalPage {
             launchAtLoginError = nil
             refreshLaunchAtLoginState(refit: false)
+        }
+        // The user may have installed / enabled Sogou since the page was built.
+        if inputSourcePage != nil, pages[index] === inputSourcePage {
+            refreshInputSourceState()
         }
         resizeWindowToFit()
     }

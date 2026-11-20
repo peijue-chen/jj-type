@@ -48,6 +48,8 @@ final class SettingsStore {
         static let aiActions = "jjtype.aiActions"
         static let selectionBar = "jjtype.selectionBar.enabled"
         static let selectionBarDirectTranslate = "jjtype.selectionBar.directTranslate"
+        static let inputSourceKeeper = "jjtype.inputSourceKeeper.enabled"
+        static let inputSourceKeeperMode = "jjtype.inputSourceKeeper.mode"
     }
 
     /// Fired whenever the provider list or active provider changes (menu rebuild).
@@ -124,6 +126,24 @@ final class SettingsStore {
     var selectionBarDirectTranslate: Bool {
         get { defaults.bool(forKey: Key.selectionBarDirectTranslate) }
         set { defaults.set(newValue, forKey: Key.selectionBarDirectTranslate) }
+    }
+
+    /// 「保持搜狗输入法」: re-selects Sogou when macOS falls back to ABC.
+    /// Defaults OFF — the keeper only runs when the user opts in.
+    var inputSourceKeeperEnabled: Bool {
+        get { defaults.bool(forKey: Key.inputSourceKeeper) }
+        set { defaults.set(newValue, forKey: Key.inputSourceKeeper) }
+    }
+
+    /// Correction strategy for the keeper. Defaults to app-switch only, which
+    /// leaves manual switches inside one app alone.
+    var inputSourceKeeperMode: InputSourceKeeperMode {
+        get {
+            guard let raw = defaults.string(forKey: Key.inputSourceKeeperMode),
+                  let mode = InputSourceKeeperMode(rawValue: raw) else { return .onAppSwitch }
+            return mode
+        }
+        set { defaults.set(newValue.rawValue, forKey: Key.inputSourceKeeperMode) }
     }
 
     var activeProvider: ProviderConfig? {
