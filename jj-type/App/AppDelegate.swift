@@ -87,11 +87,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ClipboardHistoryService.shared.start()
 
         // Input-source keeper: restores the saved preference and starts the
-        // observers. It stays inert unless a Sogou input source is actually
+        // observers. It stays inert unless the target input source is actually
         // installed AND enabled — refreshStatus() decides that.
         inputSourceKeeper.onChanged = { [weak self] in
             MainActor.assumeIsolated { self?.rebuildStatusMenu() }
         }
+        inputSourceKeeper.setTarget(settingsStore.inputSourceKeeperTarget)
         inputSourceKeeper.setMode(settingsStore.inputSourceKeeperMode)
         if settingsStore.inputSourceKeeperEnabled {
             inputSourceKeeper.setEnabled(true)
@@ -99,8 +100,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             inputSourceKeeper.refreshStatus()
         }
         // Re-scan when the app is activated: the user may have just installed
-        // or enabled Sogou in System Settings. A status change fires onChanged,
-        // which rebuilds the menu.
+        // or enabled the target IME in System Settings. A status change fires
+        // onChanged, which rebuilds the menu.
         NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification,
             object: nil,
@@ -472,29 +473,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Input source keeper
 
-    /// 「输入法」submenu: enable toggle, correction mode, live status and a
-    /// shortcut to the system keyboard pane. The keeper stays inert when no
-    /// Sogou input source is installed — the submenu says so instead of
-    /// offering a toggle that would do nothing.
+    /// 「输入法」submenu: enable toggle, target picker, correction mode, live
+    /// status and a shortcut to the system keyboard pane. The keeper stays
+    /// inert when the target input source is not installed — the submenu says
+    /// so instead of offering a toggle that would do nothing.
     private func inputSourceMenuItem() -> NSMenuItem {
         let keeper = inputSourceKeeper
         let title: String
         if keeper.isEnabled, keeper.status.isReady {
-            title = "输入法 · 保持搜狗"
+            title = "输入法 · 保持\(keeper.targetDisplayName)"
         } else {
             title = "输入法"
         }
         let parent = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         let submenu = NSMenu()
 
-        let toggle = NSMenuItem(title: "保持搜狗输入法", action: #selector(toggleInputSourceKeeper(_:)),
+        let toggle = NSMenuItem(title: "保持输入法", action: #selector(toggleInputSourceKeeper(_:)),
                                 keyEquivalent: "")
         toggle.target = self
         toggle.state = keeper.isEnabled ? .on : .off
         // An enabled keeper stays toggleable so it can always be turned off,
-        // even after Sogou has been uninstalled.
+        // even after the target IME has been uninstalled.
         toggle.isEnabled = keeper.status.isReady || keeper.isEnabled
         submenu.addItem(toggle)
+
+        submenu.addItem(.separator())
+        let targetItem = NSMenuItem(title: "目标输入法", action: nil, keyEquivalent: "")
+        targetItem.submenu = inputSourceTargetSubmenu()
+        submenu.addItem(targetItem)
 
         submenu.addItem(.separator())
         for mode in InputSourceKeeperMode.allCases {
@@ -527,10 +533,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return parent
     }
 
+    /// Radio list of every enabled, selectable **input method** plus an "auto"
+    /// entry that falls back to Sogou. Keyboard layouts are excluded so the
+    /// user cannot accidentally pin ABC.
+    private func inputSourceTargetSubmenu() -> NSMenu {
+        let keeper = inputSourceKeeper
+        let menu = NSMenu()
+
+        let auto = NSMenuItem(title: "自动（搜狗）", action: #selector(setInputSourceKeeperTarget(_:)),
+                              keyEquivalent: "")
+        auto.target = self
+        auto.representedObject = ""
+        auto.state = keeper.targetID == nil ? .on : .off
+        menu.addItem(auto)
+
+        let sources = InputSourceKeeper.selectableInputMethods()
+        if !sources.isEmpty {
+            menu.addItem(.separator())
+        }
+        for source in sources {
+            let item = NSMenuItem(title: source.name, action: #selector(setInputSourceKeeperTarget(_:)),
+                                  keyEquivalent: "")
+            item.target = self
+            item.representedObject = source.id
+            item.state = keeper.targetID == source.id ? .on : .off
+            menu.addItem(item)
+        }
+        // Keep a stored target visible when it is not in the IME list: either a
+        // keyboard layout picked before the list was filtered, or an IME that is
+        // currently uninstalled/disabled.
+        if let target = keeper.targetID,
+           !sources.contains(where: { InputSourceKeeper.isSameSource($0.id, target) }) {
+            let stillValid = InputSourceKeeper.selectableSources()
+                .contains { InputSourceKeeper.isSameSource($0.id, target) }
+            menu.addItem(.separator())
+            let item = NSMenuItem(title: stillValid ? "\(target)（键盘布局）" : "\(target)（不可用）",
+                                  action: #selector(setInputSourceKeeperTarget(_:)),
+                                  keyEquivalent: "")
+            item.target = self
+            item.representedObject = target
+            item.state = .on
+            menu.addItem(item)
+        }
+        return menu
+    }
+
     @objc private func toggleInputSourceKeeper(_ sender: NSMenuItem) {
         let enabled = !inputSourceKeeper.isEnabled
         settingsStore.inputSourceKeeperEnabled = enabled
         inputSourceKeeper.setEnabled(enabled)
+        rebuildStatusMenu()
+    }
+
+    @objc private func setInputSourceKeeperTarget(_ sender: NSMenuItem) {
+        let raw = sender.representedObject as? String ?? ""
+        let id: String? = raw.isEmpty ? nil : raw
+        settingsStore.inputSourceKeeperTarget = id
+        inputSourceKeeper.setTarget(id)
         rebuildStatusMenu()
     }
 

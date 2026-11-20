@@ -50,6 +50,7 @@ final class SettingsStore {
         static let selectionBarDirectTranslate = "jjtype.selectionBar.directTranslate"
         static let inputSourceKeeper = "jjtype.inputSourceKeeper.enabled"
         static let inputSourceKeeperMode = "jjtype.inputSourceKeeper.mode"
+        static let inputSourceKeeperTarget = "jjtype.inputSourceKeeper.target"
     }
 
     /// Fired whenever the provider list or active provider changes (menu rebuild).
@@ -128,8 +129,8 @@ final class SettingsStore {
         set { defaults.set(newValue, forKey: Key.selectionBarDirectTranslate) }
     }
 
-    /// 「保持搜狗输入法」: re-selects Sogou when macOS falls back to ABC.
-    /// Defaults OFF — the keeper only runs when the user opts in.
+    /// 「保持输入法」: re-selects the chosen input source when macOS falls back
+    /// to ABC. Defaults OFF — the keeper only runs when the user opts in.
     var inputSourceKeeperEnabled: Bool {
         get { defaults.bool(forKey: Key.inputSourceKeeper) }
         set { defaults.set(newValue, forKey: Key.inputSourceKeeper) }
@@ -144,6 +145,12 @@ final class SettingsStore {
             return mode
         }
         set { defaults.set(newValue.rawValue, forKey: Key.inputSourceKeeperMode) }
+    }
+
+    /// Input source ID the user chose to keep. `nil` means "auto" (Sogou).
+    var inputSourceKeeperTarget: String? {
+        get { defaults.string(forKey: Key.inputSourceKeeperTarget) }
+        set { defaults.set(newValue, forKey: Key.inputSourceKeeperTarget) }
     }
 
     var activeProvider: ProviderConfig? {

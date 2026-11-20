@@ -148,13 +148,20 @@ final class SettingsWindowController: NSWindowController {
     /// The tools-page hint quotes the current selection-bar shortcut.
     private var selectionBarHintLabel: NSTextField?
 
-    // MARK: - Input source page (保持搜狗输入法)
+    // MARK: - Input source page (保持输入法)
 
     private var inputSourceKeeperToggle: NSButton?
+    private var inputSourceKeeperTargetPopup: NSPopUpButton?
     private var inputSourceKeeperModePopup: NSPopUpButton?
     private var inputSourceKeeperStatusLabel: NSTextField?
     private var inputSourceKeeperCurrentLabel: NSTextField?
     private weak var inputSourcePage: NSStackView?
+    /// IDs backing `inputSourceKeeperTargetPopup`, in the same order as its
+    /// items. `nil` entry = "auto" (Sogou fallback).
+    private var inputSourceTargetIDs: [String?] = []
+    /// Signature of the last rendered source list, used to skip rebuilding the
+    /// popup when nothing changed.
+    private var inputSourceTargetSignature: String = ""
 
     // MARK: - General page (开机自启)
 
@@ -979,10 +986,16 @@ final class SettingsWindowController: NSWindowController {
     // MARK: - Page 7: 输入法 — keep a third-party IME selected
 
     private func makeInputSourcePage() -> NSStackView {
-        let toggle = NSButton(checkboxWithTitle: "保持搜狗输入法",
+        let toggle = NSButton(checkboxWithTitle: "保持输入法",
                               target: self, action: #selector(inputSourceKeeperToggled(_:)))
         toggle.state = store.inputSourceKeeperEnabled ? .on : .off
         inputSourceKeeperToggle = toggle
+
+        let targetPopup = NSPopUpButton()
+        targetPopup.target = self
+        targetPopup.action = #selector(inputSourceKeeperTargetChanged(_:))
+        pinFieldWidth(targetPopup, width: 200)
+        inputSourceKeeperTargetPopup = targetPopup
 
         let modePopup = NSPopUpButton()
         for mode in InputSourceKeeperMode.allCases {
@@ -1012,6 +1025,7 @@ final class SettingsWindowController: NSWindowController {
         openSettings.action = #selector(openKeyboardSettings)
 
         let formGrid = makeFormGrid([
+            ("目标输入法", targetPopup),
             ("纠正时机", modePopup),
             ("系统设置", openSettings),
         ])
@@ -1023,11 +1037,11 @@ final class SettingsWindowController: NSWindowController {
         card.content.addArrangedSubview(status)
         card.content.addArrangedSubview(current)
         card.content.addArrangedSubview(
-            makeHint("macOS 会按 App 记住上次用的输入法，切走再回来常常变回 ABC。开启后 JJType 会在切换 App 时把输入法切回搜狗。"))
+            makeHint("macOS 会按 App 记住上次用的输入法，切走再回来常常变回 ABC。开启后 JJType 会在切换 App 时把输入法切回你选的目标。"))
         card.content.addArrangedSubview(
-            makeHint("「切换 App 时纠正」不会干扰你在同一个 App 里手动切换；「始终纠正」会在任何时刻把输入法拉回搜狗。"))
+            makeHint("「切换 App 时纠正」不会干扰你在同一个 App 里手动切换；「始终纠正」会在任何时刻把输入法拉回目标输入法。"))
         card.content.addArrangedSubview(
-            makeHint("纠正会延迟约 0.3 秒执行：立即切回会让搜狗在「停用未完成」时被重新激活，导致它卡在英文模式、Shift 切不回中文。"))
+            makeHint("纠正会延迟约 0.5 秒执行：立即切回会让输入法在「停用未完成」时被重新激活，导致它卡在英文模式、Shift 切不回中文。"))
 
         let page = makePage([card])
         inputSourcePage = page
@@ -1045,16 +1059,17 @@ final class SettingsWindowController: NSWindowController {
         if let index = InputSourceKeeperMode.allCases.firstIndex(of: keeper.mode) {
             inputSourceKeeperModePopup?.selectItem(at: index)
         }
+        reloadInputSourceTargetPopup(selected: keeper.targetID)
 
         switch keeper.status {
-        case .ready(let name):
+        case .ready(_, let name):
             inputSourceKeeperStatusLabel?.stringValue = "✓ 已检测到 \(name)"
             inputSourceKeeperStatusLabel?.textColor = .secondaryLabelColor
         case .installedButDisabled:
-            inputSourceKeeperStatusLabel?.stringValue = "! 已安装搜狗输入法，但系统尚未启用它。请到「系统设置 → 键盘 → 输入法」添加。"
+            inputSourceKeeperStatusLabel?.stringValue = "! 目标输入法已安装，但系统尚未启用它。请到「系统设置 → 键盘 → 输入法」添加。"
             inputSourceKeeperStatusLabel?.textColor = .systemOrange
         case .notInstalled:
-            inputSourceKeeperStatusLabel?.stringValue = "未检测到搜狗输入法。安装后回到本页即可启用。"
+            inputSourceKeeperStatusLabel?.stringValue = "未检测到目标输入法。安装后回到本页即可启用。"
             inputSourceKeeperStatusLabel?.textColor = .secondaryLabelColor
         }
 
@@ -1067,16 +1082,75 @@ final class SettingsWindowController: NSWindowController {
         // The keeper is inert without a ready target — say so instead of
         // letting the checkbox look like it is doing something. An already
         // enabled keeper stays toggleable so the user can always turn it off
-        // (e.g. after uninstalling Sogou).
+        // (e.g. after uninstalling the target IME).
         let ready = keeper.status.isReady
         inputSourceKeeperToggle?.isEnabled = ready || keeper.isEnabled
+        inputSourceKeeperTargetPopup?.isEnabled = true
         inputSourceKeeperModePopup?.isEnabled = ready && keeper.isEnabled
+    }
+
+    /// Rebuilds the target popup from the live input-source list. Rebuilding is
+    /// skipped when the list is unchanged, because replacing the menu while it
+    /// is open would close it.
+    private func reloadInputSourceTargetPopup(selected: String?) {
+        guard let popup = inputSourceKeeperTargetPopup else { return }
+        let sources = InputSourceKeeper.selectableInputMethods()
+
+        // A stored target that is not in the IME list is either a keyboard
+        // layout picked before the list was filtered, or an IME that is
+        // currently uninstalled/disabled. Keep it visible so the popup matches
+        // what the keeper is actually targeting.
+        var extraTarget: String?
+        var extraLabel: String?
+        if let selected,
+           !sources.contains(where: { InputSourceKeeper.isSameSource($0.id, selected) }) {
+            extraTarget = selected
+            let stillValid = InputSourceKeeper.selectableSources()
+                .contains { InputSourceKeeper.isSameSource($0.id, selected) }
+            extraLabel = stillValid ? "\(selected)（键盘布局）" : "\(selected)（不可用）"
+        }
+
+        let signature = sources.map { "\($0.id)|\($0.name)" }.joined(separator: "\n")
+            + "\u{1F}" + (extraTarget ?? "")
+        if signature == inputSourceTargetSignature, popup.numberOfItems > 0 {
+            if let index = inputSourceTargetIDs.firstIndex(where: { $0 == selected }) {
+                popup.selectItem(at: index)
+            }
+            return
+        }
+        inputSourceTargetSignature = signature
+
+        popup.removeAllItems()
+        inputSourceTargetIDs = [nil]
+        popup.addItem(withTitle: "自动（搜狗）")
+        for source in sources {
+            inputSourceTargetIDs.append(source.id)
+            popup.addItem(withTitle: source.name)
+        }
+        if let extraTarget, let extraLabel {
+            inputSourceTargetIDs.append(extraTarget)
+            popup.addItem(withTitle: extraLabel)
+        }
+        if let index = inputSourceTargetIDs.firstIndex(where: { $0 == selected }) {
+            popup.selectItem(at: index)
+        } else {
+            popup.selectItem(at: 0)
+        }
     }
 
     @objc private func inputSourceKeeperToggled(_ sender: NSButton) {
         let enabled = sender.state == .on
         store.inputSourceKeeperEnabled = enabled
         InputSourceKeeper.shared.setEnabled(enabled)
+        refreshInputSourceState()
+    }
+
+    @objc private func inputSourceKeeperTargetChanged(_ sender: NSPopUpButton) {
+        let index = sender.indexOfSelectedItem
+        guard index >= 0, index < inputSourceTargetIDs.count else { return }
+        let id = inputSourceTargetIDs[index]
+        store.inputSourceKeeperTarget = id
+        InputSourceKeeper.shared.setTarget(id)
         refreshInputSourceState()
     }
 
