@@ -436,6 +436,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let parent = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         let submenu = NSMenu()
+
+        // Display policy first: it decides whether the screen stays lit, which
+        // matters for a LOCKED session (a lit screen defeats the lock).
+        let displayItem = NSMenuItem(title: "允许息屏（锁屏时建议开启）",
+                                     action: #selector(toggleKeepAwakeDisplay),
+                                     keyEquivalent: "")
+        displayItem.target = self
+        displayItem.state = settingsStore.keepAwakeAllowsDisplaySleep ? .on : .off
+        submenu.addItem(displayItem)
+        submenu.addItem(.separator())
+
         let presets: [(String, TimeInterval?)] = [
             ("开启（直到手动关闭）", nil),
             ("30 分钟", 30 * 60),
@@ -463,12 +474,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return parent
     }
 
+    /// Toggles "let the display sleep" and applies it to the running session
+    /// immediately WITHOUT restarting its countdown. A failure to re-launch
+    /// caffeinate must not be silent (feedback rule).
+    @objc private func toggleKeepAwakeDisplay() {
+        let newValue = !settingsStore.keepAwakeAllowsDisplaySleep
+        do {
+            try keepAwake.setDisplayPolicy(keepDisplayOn: !newValue)
+            // Only persist once the change actually took effect; a failed
+            // relaunch must not leave a setting that the running session ignores.
+            settingsStore.keepAwakeAllowsDisplaySleep = newValue
+        } catch {
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = "无法修改息屏设置"
+            alert.informativeText = (error as? LocalizedError)?.errorDescription
+                ?? error.localizedDescription
+            alert.runModal()
+        }
+        rebuildStatusMenu()
+    }
+
     /// Menu action: (re)starts keep-awake with the chosen preset. A start
     /// failure must never be silent (feedback rule) — it surfaces as an alert.
     @objc private func startKeepAwake(_ sender: NSMenuItem) {
         let duration = sender.representedObject as? TimeInterval
         do {
-            try keepAwake.enable(for: duration)
+            try keepAwake.enable(for: duration,
+                                 keepDisplayOn: !settingsStore.keepAwakeAllowsDisplaySleep)
         } catch {
             NSApp.activate(ignoringOtherApps: true)
             let alert = NSAlert()

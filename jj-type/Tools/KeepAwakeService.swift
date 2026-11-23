@@ -24,6 +24,8 @@ final class KeepAwakeService {
     var onChanged: (() -> Void)?
 
     private(set) var isActive = false
+    /// Whether the current session also keeps the DISPLAY awake (`caffeinate -d`).
+    private(set) var keepDisplayOn = true
     /// Length of the current session; nil while inactive OR running indefinitely.
     private(set) var sessionDuration: TimeInterval?
     /// Expiry of the current timed session; nil while inactive OR indefinite.
@@ -38,14 +40,23 @@ final class KeepAwakeService {
 
     /// Starts caffeinate. `duration == nil` runs until disable(); a finite
     /// duration auto-stops at the deadline. Re-enabling replaces the session.
-    func enable(for duration: TimeInterval?) throws {
+    ///
+    /// `keepDisplayOn == false` drops caffeinate's `-d` flag, which is what a
+    /// LOCKED session needs: `-d` asserts `PreventUserIdleDisplaySleep`, so the
+    /// screen would never turn off and the lock screen would be readable by
+    /// anyone walking past. Without `-d` the display sleeps normally while
+    /// `-i`/`-s` still keep the system (and therefore the network watchdog)
+    /// alive.
+    func enable(for duration: TimeInterval?, keepDisplayOn: Bool = true) throws {
         stopSession()
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
-        // -d keep the display awake, -i prevent system idle sleep,
-        // -s prevent system sleep on AC power.
-        process.arguments = ["-d", "-i", "-s"]
+        // -i prevent system idle sleep, -s prevent system sleep on AC power,
+        // -d additionally keep the DISPLAY awake (opt-in).
+        var arguments = ["-i", "-s"]
+        if keepDisplayOn { arguments.append("-d") }
+        process.arguments = arguments
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         // Fires on an arbitrary background queue — hop to the main actor
@@ -69,6 +80,7 @@ final class KeepAwakeService {
 
         self.process = process
         isActive = true
+        self.keepDisplayOn = keepDisplayOn
         sessionDuration = duration
         if let duration {
             deadline = Date().addingTimeInterval(duration)
@@ -88,6 +100,28 @@ final class KeepAwakeService {
         guard isActive else { return }
         stopSession()
         onChanged?()
+    }
+
+    /// Re-launches caffeinate with a different display policy while KEEPING the
+    /// current session's remaining time.
+    ///
+    /// A plain `enable(for: sessionDuration)` would restart the countdown — a
+    /// "30 分钟" session would silently gain another 30 minutes just because the
+    /// user toggled 允许息屏. The remaining interval is carried over instead.
+    func setDisplayPolicy(keepDisplayOn: Bool) throws {
+        guard isActive, self.keepDisplayOn != keepDisplayOn else { return }
+        let remaining: TimeInterval?
+        if let deadline {
+            let left = deadline.timeIntervalSinceNow
+            guard left > 0 else {
+                // The deadline already passed; let the expiry handler do its job.
+                return
+            }
+            remaining = left
+        } else {
+            remaining = nil   // indefinite
+        }
+        try enable(for: remaining, keepDisplayOn: keepDisplayOn)
     }
 
     /// Quit-time cleanup: SIGTERM plus a short run-loop pump so no caffeinate
@@ -128,6 +162,9 @@ final class KeepAwakeService {
         deadline = nil
         sessionDuration = nil
         isActive = false
+        // Back to the default so a later `setDisplayPolicy` comparison starts
+        // from a known value instead of the previous session's choice.
+        keepDisplayOn = true
         if let process {
             if process.isRunning {
                 stopping = true
@@ -148,6 +185,7 @@ final class KeepAwakeService {
         process = nil
         guard !wasStopping, isActive else { return }
         isActive = false
+        keepDisplayOn = true
         expiryTimer?.invalidate()
         expiryTimer = nil
         countdownTimer?.invalidate()

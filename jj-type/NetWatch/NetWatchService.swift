@@ -654,7 +654,11 @@ final class NetWatchService {
         timer?.invalidate()
         let interval = TimeInterval(max(config.checkIntervalSeconds, 10))
         let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.checkNow() }
+            // Bind strongly first: capturing the weak `self` var directly inside
+            // the concurrently-executing Task is a Swift 6 error. The timer fires
+            // on RunLoop.main, so this hop is only to satisfy actor isolation.
+            guard let self else { return }
+            Task { @MainActor in self.checkNow() }
         }
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer

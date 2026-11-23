@@ -52,6 +52,7 @@ final class SettingsStore {
         static let inputSourceKeeperMode = "jjtype.inputSourceKeeper.mode"
         static let inputSourceKeeperTarget = "jjtype.inputSourceKeeper.target"
         static let netWatchConfig = "jjtype.netWatch.config"
+        static let keepAwakeAllowsDisplaySleep = "jjtype.keepAwake.allowsDisplaySleep"
     }
 
     /// Fired whenever the provider list or active provider changes (menu rebuild).
@@ -152,6 +153,20 @@ final class SettingsStore {
     var inputSourceKeeperTarget: String? {
         get { defaults.string(forKey: Key.inputSourceKeeperTarget) }
         set { defaults.set(newValue, forKey: Key.inputSourceKeeperTarget) }
+    }
+
+    /// 防休眠 display policy. `true` (default) lets the screen turn off while
+    /// keep-awake runs — required for a LOCKED session, otherwise caffeinate's
+    /// `-d` keeps the display lit and the lock screen stays readable.
+    /// The system itself still never idles into sleep either way.
+    var keepAwakeAllowsDisplaySleep: Bool {
+        get {
+            // Default ON: protecting a locked screen matters more than keeping
+            // the display awake, and the user can opt out per session.
+            if defaults.object(forKey: Key.keepAwakeAllowsDisplaySleep) == nil { return true }
+            return defaults.bool(forKey: Key.keepAwakeAllowsDisplaySleep)
+        }
+        set { defaults.set(newValue, forKey: Key.keepAwakeAllowsDisplaySleep) }
     }
 
     /// Network watchdog configuration. The Wi-Fi password is NOT part of this

@@ -193,7 +193,9 @@ nonisolated enum NetWatchProbe {
             }
             linkDetail = "\(interface): gateway \(gateway) unreachable"
         }
-        guard let linkedInterface else {
+        // Only used as a nil check: the interface name itself is already in
+        // `linkDetail`, so binding it would just produce an unused value.
+        guard linkedInterface != nil else {
             return .noLink(reason: linkDetail)
         }
 
