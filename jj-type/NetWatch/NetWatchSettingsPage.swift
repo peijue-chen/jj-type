@@ -58,6 +58,8 @@ final class NetWatchSettingsPage: NSObject, NSTextFieldDelegate {
     private let webhookField = NSTextField()
     private let notifySuccessToggle = NSButton(checkboxWithTitle: "成功时通知", target: nil, action: nil)
     private let notifyFailureToggle = NSButton(checkboxWithTitle: "失败时通知", target: nil, action: nil)
+    private let heartbeatToggle = NSButton(checkboxWithTitle: "定期发送「守护进程运行中」通知", target: nil, action: nil)
+    private let heartbeatIntervalField = NSTextField()
     private let webhookTestButton = Theme.button("发送测试通知", symbol: "paperplane")
     private let webhookResultLabel = NSTextField(wrappingLabelWithString: "")
 
@@ -66,7 +68,7 @@ final class NetWatchSettingsPage: NSObject, NSTextFieldDelegate {
 
     /// Number fields skipped by `controlTextDidChange` (see there).
     private var numberFields: [NSTextField] {
-        [intervalField, outageField, cooldownField, vpnGraceField]
+        [intervalField, outageField, cooldownField, vpnGraceField, heartbeatIntervalField]
     }
 
     init(service: NetWatchService) {
@@ -323,6 +325,15 @@ final class NetWatchSettingsPage: NSObject, NSTextFieldDelegate {
         toggles.spacing = 16
         card.content.addArrangedSubview(toggles)
 
+        heartbeatToggle.target = self
+        heartbeatToggle.action = #selector(controlChanged)
+        card.content.addArrangedSubview(heartbeatToggle)
+
+        configureNumberField(heartbeatIntervalField, value: config.heartbeatIntervalSeconds)
+        card.content.addArrangedSubview(formGrid([
+            ("心跳间隔（秒）", heartbeatIntervalField),
+        ]))
+
         webhookTestButton.target = self
         webhookTestButton.action = #selector(testWebhook)
         card.content.addArrangedSubview(webhookTestButton)
@@ -333,6 +344,10 @@ final class NetWatchSettingsPage: NSObject, NSTextFieldDelegate {
         card.content.addArrangedSubview(webhookResultLabel)
 
         card.content.addArrangedSubview(hint("通知格式：标题 / 时间 / 主机 / 原因 / 结果 / 详情，末尾带分隔线，方便在群里按条阅读。断网期间通知会进入本地队列，网络恢复后自动补发。"))
+        card.content.addArrangedSubview(fieldExplanation("心跳通知",
+            "开启后，只要网络正常，每隔「心跳间隔」就发一条「守护进程仍在运行」的通知，用来确认守护没有悄悄退出。"
+            + "默认 7200 秒（2 小时）。它借用正常的探测节奏，不额外开定时器，所以实际间隔可能比设定值多出一个检查间隔。"
+            + "断网期间不发；网络恢复后从恢复那一刻重新计时，不会紧接着恢复通知再发一条。"))
         return card
     }
 
@@ -412,6 +427,8 @@ final class NetWatchSettingsPage: NSObject, NSTextFieldDelegate {
         webhookField.stringValue = config.webhookURL
         notifySuccessToggle.state = config.notifyOnSuccess ? .on : .off
         notifyFailureToggle.state = config.notifyOnFailure ? .on : .off
+        heartbeatToggle.state = config.heartbeatEnabled ? .on : .off
+        heartbeatIntervalField.stringValue = String(config.heartbeatIntervalSeconds)
         loadAppList()
         refreshStatus()
     }
@@ -436,6 +453,9 @@ final class NetWatchSettingsPage: NSObject, NSTextFieldDelegate {
         }
         if let lastRecovery = service.lastRecovery {
             lines.append("上次恢复：\(Self.timeFormatter.string(from: lastRecovery))")
+        }
+        if let lastHeartbeat = service.lastHeartbeatSent {
+            lines.append("上次心跳：\(Self.timeFormatter.string(from: lastHeartbeat))")
         }
         if let error = service.lastError, !error.isEmpty {
             lines.append("最近错误：\(error)")
@@ -546,6 +566,8 @@ final class NetWatchSettingsPage: NSObject, NSTextFieldDelegate {
         newConfig.webhookURL = webhookField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         newConfig.notifyOnSuccess = notifySuccessToggle.state == .on
         newConfig.notifyOnFailure = notifyFailureToggle.state == .on
+        newConfig.heartbeatEnabled = heartbeatToggle.state == .on
+        newConfig.heartbeatIntervalSeconds = positiveInt(heartbeatIntervalField, fallback: config.heartbeatIntervalSeconds)
 
         // Password bookkeeping: only write the key when the password still
         // belongs to the SSID in the field. Editing the SSID invalidates it, and

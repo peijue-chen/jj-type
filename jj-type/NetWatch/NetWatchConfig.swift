@@ -55,6 +55,16 @@ struct NetWatchConfig: Equatable {
     var notifyOnSuccess: Bool = true
     var notifyOnFailure: Bool = true
 
+    // MARK: - Heartbeat
+
+    /// Periodic "still running" webhook so the user knows the watchdog is alive.
+    ///
+    /// Deliberately NOT a dedicated timer: the heartbeat is evaluated on the
+    /// normal probe tick and only fires once the interval has elapsed, so a
+    /// 30 s check interval means the heartbeat lands within 30 s of the target.
+    var heartbeatEnabled: Bool = true
+    var heartbeatIntervalSeconds: Int = 7_200
+
     static let `default` = NetWatchConfig()
 
     /// Clamp values into sane ranges so a typo in the UI cannot spin the
@@ -66,6 +76,8 @@ struct NetWatchConfig: Equatable {
         copy.switchCooldownSeconds = min(max(copy.switchCooldownSeconds, 60), 86_400)
         copy.vpnGraceSeconds = min(max(copy.vpnGraceSeconds, 30), 86_400)
         copy.vpnWaitSeconds = min(max(copy.vpnWaitSeconds, 10), 600)
+        // 5 minutes .. 24 hours. A shorter heartbeat would just be noise.
+        copy.heartbeatIntervalSeconds = min(max(copy.heartbeatIntervalSeconds, 300), 86_400)
         copy.backupSSID = copy.backupSSID.trimmingCharacters(in: .whitespacesAndNewlines)
         copy.wifiInterface = copy.wifiInterface.trimmingCharacters(in: .whitespacesAndNewlines)
         copy.vpnAppPath = copy.vpnAppPath.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -110,6 +122,8 @@ extension NetWatchConfig: Codable {
         case webhookURL
         case notifyOnSuccess
         case notifyOnFailure
+        case heartbeatEnabled
+        case heartbeatIntervalSeconds
     }
 
     /// Decode with per-field fallbacks so a config written by an older build
@@ -135,5 +149,7 @@ extension NetWatchConfig: Codable {
         webhookURL = try container.decodeIfPresent(String.self, forKey: .webhookURL) ?? fallback.webhookURL
         notifyOnSuccess = try container.decodeIfPresent(Bool.self, forKey: .notifyOnSuccess) ?? fallback.notifyOnSuccess
         notifyOnFailure = try container.decodeIfPresent(Bool.self, forKey: .notifyOnFailure) ?? fallback.notifyOnFailure
+        heartbeatEnabled = try container.decodeIfPresent(Bool.self, forKey: .heartbeatEnabled) ?? fallback.heartbeatEnabled
+        heartbeatIntervalSeconds = try container.decodeIfPresent(Int.self, forKey: .heartbeatIntervalSeconds) ?? fallback.heartbeatIntervalSeconds
     }
 }

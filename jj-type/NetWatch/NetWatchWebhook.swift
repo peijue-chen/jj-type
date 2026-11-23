@@ -19,6 +19,7 @@ nonisolated struct NetWatchMessage {
         case vpnFailed = "VPN 连接失败"
         case switchFailed = "备用网络切换失败"
         case networkUnusable = "备用网络不可用"
+        case heartbeat = "守护进程运行中"
         case test = "测试通知"
     }
 

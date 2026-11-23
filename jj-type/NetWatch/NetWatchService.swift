@@ -58,6 +58,16 @@ final class NetWatchService {
     private(set) var lastError: String?
     private(set) var lastProbeDetail = ""
 
+    /// Anchor for the heartbeat interval. Reset on start and on every recovery,
+    /// so the count always begins at the moment the network came back — a
+    /// heartbeat is never sent right after a recovery notification.
+    private(set) var heartbeatClock: Date?
+    /// Last time a heartbeat webhook was actually delivered (shown in the UI).
+    private(set) var lastHeartbeatSent: Date?
+    /// After a failed heartbeat send, wait this long before trying again so a
+    /// broken endpoint is not hammered on every 30 s tick.
+    private var heartbeatRetryAt: Date?
+
     /// Fired on every state change so the menu can rebuild.
     var onStatusChanged: (() -> Void)?
 
@@ -114,6 +124,15 @@ final class NetWatchService {
         } else {
             stop()
         }
+
+        // Turning the heartbeat on starts a fresh interval instead of firing
+        // immediately on the next tick just because the app has been running
+        // for a while.
+        if !previous.heartbeatEnabled, sanitized.heartbeatEnabled {
+            heartbeatClock = Date()
+            heartbeatRetryAt = nil
+        }
+
         publishStatus()
     }
 
@@ -121,6 +140,9 @@ final class NetWatchService {
         guard config.enabled else { return }
         guard timer == nil else { return }
         phase = .healthy
+        // First heartbeat lands one full interval after the service starts.
+        heartbeatClock = Date()
+        heartbeatRetryAt = nil
         beginActivity()
         scheduleTimer()
         NetWatchLog.note("service started interval=\(config.checkIntervalSeconds)s")
@@ -143,6 +165,8 @@ final class NetWatchService {
         backoffUntil = nil
         isChecking = false
         lastError = nil
+        heartbeatClock = nil
+        heartbeatRetryAt = nil
         phase = .disabled
         NetWatchLog.note("service stopped")
         publishStatus()
@@ -251,6 +275,10 @@ final class NetWatchService {
 
         switch connectivity {
         case .overseasOK:
+            // Captured before the phase is mutated: a transition from anything
+            // other than `.healthy` means the network just came back, and the
+            // heartbeat window must restart from that moment.
+            let wasHealthy = phase == .healthy
             consecutiveFailures = 0
             outageStart = nil
             if needsRecovery {
@@ -268,9 +296,14 @@ final class NetWatchService {
                 vpnRestartFailures = 0
                 vpnRestartBackoffUntil = nil
             }
+            if !wasHealthy {
+                heartbeatClock = Date()
+                heartbeatRetryAt = nil
+            }
             if config.webhookEnabled {
                 Task { await NetWatchWebhook.flush(urlString: config.webhookURL) }
             }
+            maybeSendHeartbeat(config: config)
 
         case .localOnly(let domestic, let overseas):
             // The whole network is fine, only the road abroad is broken.
@@ -335,6 +368,87 @@ final class NetWatchService {
         let minutes = seconds / 60
         if minutes < 60 { return "约 \(minutes) 分钟" }
         return "约 \(minutes / 60) 小时 \(minutes % 60) 分钟"
+    }
+
+    // MARK: - Heartbeat
+
+    /// Sends the periodic "still running" webhook.
+    ///
+    /// Called from the healthy branch of `handle()`, i.e. on the normal probe
+    /// tick — there is no dedicated timer. The heartbeat only fires once the
+    /// configured interval has elapsed, so with a 30 s check interval it lands
+    /// within 30 s of the target.
+    ///
+    /// Deliberately uses `NetWatchWebhook.send` (not `deliver`): a heartbeat is
+    /// only meaningful "now", so a failed one must NOT enter the offline queue
+    /// and get replayed hours later next to a real alert.
+    private func maybeSendHeartbeat(config: NetWatchConfig) {
+        guard config.heartbeatEnabled,
+              config.webhookEnabled,
+              !config.webhookURL.isEmpty,
+              !needsRecovery,
+              phase == .healthy else { return }
+
+        let now = Date()
+        if let heartbeatRetryAt, now < heartbeatRetryAt { return }
+
+        guard let clock = heartbeatClock else {
+            heartbeatClock = now
+            return
+        }
+
+        let interval = TimeInterval(max(config.heartbeatIntervalSeconds, 60))
+        let elapsed = now.timeIntervalSince(clock)
+        guard elapsed >= interval else { return }
+
+        // Claim the slot before the async send so a slow webhook cannot make
+        // the next tick send a second heartbeat.
+        heartbeatClock = now
+        heartbeatRetryAt = nil
+
+        let message = NetWatchMessage(
+            kind: .heartbeat,
+            reason: "距上次心跳 \(durationText(elapsed))",
+            result: "网络正常，守护进程仍在运行",
+            detail: "检查间隔 \(config.checkIntervalSeconds)s · 心跳间隔 \(config.heartbeatIntervalSeconds)s")
+        NetWatchLog.note("heartbeat sending (interval elapsed \(Int(elapsed))s)")
+
+        Task { [weak self] in
+            let ok = await NetWatchWebhook.send(urlString: config.webhookURL, text: message.text)
+            guard let self else { return }
+            if ok {
+                self.lastHeartbeatSent = Date()
+                NetWatchLog.note("heartbeat sent")
+                // Refresh the settings page / menu so 「上次心跳」 updates.
+                self.publishStatus()
+            } else {
+                // Roll the clock back so the next attempt still counts as "due",
+                // and gate it for 5 minutes so a broken endpoint is not hit on
+                // every tick.
+                //
+                // Only if nothing else has moved the clock in the meantime: a
+                // recovery (or a stop/start) resets it to "now", and that must
+                // win — otherwise a slow failing send would resurrect a stale
+                // anchor and fire an early heartbeat right after recovery.
+                if self.heartbeatClock == now {
+                    self.heartbeatClock = clock
+                    self.heartbeatRetryAt = Date().addingTimeInterval(300)
+                    NetWatchLog.note("heartbeat failed, retry in 300s")
+                } else {
+                    NetWatchLog.note("heartbeat failed (clock already reset, next attempt after a full interval)")
+                }
+            }
+        }
+    }
+
+    /// "约 2 小时 3 分钟" style duration for the heartbeat message.
+    private func durationText(_ seconds: TimeInterval) -> String {
+        let total = max(Int(seconds), 0)
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        if hours > 0 { return "约 \(hours) 小时 \(minutes) 分钟" }
+        if minutes > 0 { return "约 \(minutes) 分钟" }
+        return "约 \(total) 秒"
     }
 
     private func shouldSwitch(config: NetWatchConfig) -> Bool {
@@ -526,6 +640,11 @@ final class NetWatchService {
             vpnDownStart = nil
             vpnRestartFailures = 0
             vpnRestartBackoffUntil = nil
+            // Recovery just finished: restart the heartbeat window here so the
+            // first heartbeat is a full interval after the network came back,
+            // not immediately after the recovery notification.
+            heartbeatClock = Date()
+            heartbeatRetryAt = nil
         } else {
             phase = .failed(reason: "恢复后 VPN 或 App 启动失败")
             lastError = "恢复后 VPN 或 App 启动失败"
