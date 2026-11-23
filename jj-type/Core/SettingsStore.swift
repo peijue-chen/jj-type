@@ -51,6 +51,7 @@ final class SettingsStore {
         static let inputSourceKeeper = "jjtype.inputSourceKeeper.enabled"
         static let inputSourceKeeperMode = "jjtype.inputSourceKeeper.mode"
         static let inputSourceKeeperTarget = "jjtype.inputSourceKeeper.target"
+        static let netWatchConfig = "jjtype.netWatch.config"
     }
 
     /// Fired whenever the provider list or active provider changes (menu rebuild).
@@ -151,6 +152,23 @@ final class SettingsStore {
     var inputSourceKeeperTarget: String? {
         get { defaults.string(forKey: Key.inputSourceKeeperTarget) }
         set { defaults.set(newValue, forKey: Key.inputSourceKeeperTarget) }
+    }
+
+    /// Network watchdog configuration. The Wi-Fi password is NOT part of this
+    /// JSON — it lives in the Keychain (KeychainStore.saveWiFiPassword).
+    var netWatchConfig: NetWatchConfig {
+        get {
+            guard let data = defaults.data(forKey: Key.netWatchConfig),
+                  let decoded = try? JSONDecoder().decode(NetWatchConfig.self, from: data) else {
+                return .default
+            }
+            return decoded
+        }
+        set {
+            if let data = try? JSONEncoder().encode(newValue) {
+                defaults.set(data, forKey: Key.netWatchConfig)
+            }
+        }
     }
 
     var activeProvider: ProviderConfig? {

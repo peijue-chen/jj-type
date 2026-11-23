@@ -22,12 +22,22 @@ enum KeychainError: LocalizedError {
 
 enum KeychainStore {
     static let service = "com.aigens.jj-type.provider"
+    /// Separate service so Wi-Fi credentials never mix with AI provider keys.
+    static let netWatchService = "com.aigens.jj-type.netwatch"
 
     private static func baseQuery(for providerID: UUID) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: providerID.uuidString,
+        ]
+    }
+
+    private static func netWatchQuery(ssid: String) -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: netWatchService,
+            kSecAttrAccount as String: ssid,
         ]
     }
 
@@ -72,5 +82,44 @@ enum KeychainStore {
     /// Deletes the API key for a provider. Missing items are not an error.
     static func deleteAPIKey(for providerID: UUID) {
         SecItemDelete(baseQuery(for: providerID) as CFDictionary)
+    }
+
+    // MARK: - NetWatch Wi-Fi password
+
+    /// Saves (insert or update) the password for a backup Wi-Fi SSID.
+    /// Returns false when the Keychain rejects the write.
+    @discardableResult
+    static func saveWiFiPassword(_ password: String, ssid: String) -> Bool {
+        guard !ssid.isEmpty else { return false }
+        let data = Data(password.utf8)
+        let query = netWatchQuery(ssid: ssid)
+        let attributes: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
+        ]
+        let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        if updateStatus == errSecSuccess { return true }
+        guard updateStatus == errSecItemNotFound else { return false }
+
+        var addQuery = query
+        addQuery[kSecValueData as String] = data
+        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+        return SecItemAdd(addQuery as CFDictionary, nil) == errSecSuccess
+    }
+
+    static func loadWiFiPassword(ssid: String) -> String? {
+        guard !ssid.isEmpty else { return nil }
+        var query = netWatchQuery(ssid: ssid)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        guard status == errSecSuccess, let data = item as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    static func deleteWiFiPassword(ssid: String) {
+        guard !ssid.isEmpty else { return }
+        SecItemDelete(netWatchQuery(ssid: ssid) as CFDictionary)
     }
 }

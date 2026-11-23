@@ -58,12 +58,20 @@ final class SettingsWindowController: NSWindowController {
                  symbol: "keyboard.badge.ellipsis",
                  colors: [NSColor(red: 0.20, green: 0.62, blue: 0.52, alpha: 1),
                           NSColor(red: 0.42, green: 0.82, blue: 0.70, alpha: 1)]),
+        PageSpec(title: "网络守护", subtitle: "断网自动切换备用网络并恢复 VPN",
+                 symbol: "wifi",
+                 colors: [NSColor(red: 0.10, green: 0.55, blue: 0.72, alpha: 1),
+                          NSColor(red: 0.20, green: 0.72, blue: 0.80, alpha: 1)]),
     ]
 
     // MARK: - Chrome
 
     private let sidebar = NSVisualEffectView()
     private var sidebarRows: [SettingsSidebarRowView] = []
+    /// Scrollable sidebar list: the rows are laid out by frame inside this
+    /// flipped container (see `buildChrome`).
+    private let sidebarScroll = LayoutReportingScrollView()
+    private let sidebarRowsContainer = FlippedContainerView()
     private let titleLabel = NSTextField(labelWithString: "")
     private let subtitleLabel = NSTextField(wrappingLabelWithString: "")
     private let pageContainer = NSView()
@@ -74,13 +82,21 @@ final class SettingsWindowController: NSWindowController {
     private var pages: [NSView] = []
     private weak var currentPage: NSView?
     private var pageConstraints: [NSLayoutConstraint] = []
+    private var netWatchPage: NetWatchSettingsPage?
 
-    private static let sidebarWidth: CGFloat = 208
+    /// 236 pt leaves room for a four-character CJK title (网络守护) plus its
+    /// 22 pt icon tile and the row's inner padding — at 208 pt the last row was
+    /// visually flush against the sidebar edge.
+    private static let sidebarWidth: CGFloat = 236
     private static let contentWidth: CGFloat = 540
     private static let contentMargin: CGFloat = 24
     private static var minWindowWidth: CGFloat { sidebarWidth + contentWidth + contentMargin * 2 }
     /// Width available to a card's content (cards span the full page width).
     private static var cardContentWidth: CGFloat { contentWidth - Theme.cardPadding * 2 }
+    /// Vertical space the sidebar uses ABOVE and BELOW its scrolling row list
+    /// (identity block + separator + margins). Used to size the window so the
+    /// page list is never clipped.
+    private static let sidebarChromeHeight: CGFloat = 40 + 34 + 14 + 1 + 8 + 8
 
     // MARK: - Provider page
 
@@ -195,9 +211,11 @@ final class SettingsWindowController: NSWindowController {
         window.contentViewController?.view = content
         self.store = store
         buildChrome(in: content)
+        let netWatch = NetWatchSettingsPage(service: NetWatchService.shared)
+        netWatchPage = netWatch
         pages = [makeGeneralPage(), makeProvidersPage(), makeHotkeyPage(),
                  makeLaunchPage(), makeTerminalPage(), makeCapturePage(),
-                 makeToolsPage(), makeInputSourcePage()]
+                 makeToolsPage(), makeInputSourcePage(), netWatch.view]
         reloadTable()
         reloadForm()
         reloadLaunchTable()
@@ -213,6 +231,11 @@ final class SettingsWindowController: NSWindowController {
         NotificationCenter.default.addObserver(
             self, selector: #selector(settingsWindowDidBecomeKey(_:)),
             name: NSWindow.didBecomeKeyNotification, object: window)
+        // Persist pending edits when the window is dismissed, so a field edited
+        // without Return/focus-loss is not thrown away.
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(settingsWindowWillClose(_:)),
+            name: NSWindow.willCloseNotification, object: window)
         // Constraints were added AFTER the contentViewController assignment, so
         // the window kept the content view's initial frame — snap it to the real
         // fitting size of the visible page now that layout is fully defined.
@@ -250,20 +273,53 @@ final class SettingsWindowController: NSWindowController {
         let sidebarSeparator = Theme.separator()
         sidebar.addSubview(sidebarSeparator)
 
-        let rowsStack = NSStackView()
-        rowsStack.orientation = .vertical
-        rowsStack.alignment = .leading
-        rowsStack.spacing = 2
-        rowsStack.translatesAutoresizingMaskIntoConstraints = false
-        sidebar.addSubview(rowsStack)
+        // The row list scrolls: the window height follows the CONTENT page, so a
+        // short page (or a small screen) would otherwise clip the last entries —
+        // which is exactly how 网络守护 ended up half cut off.
+        //
+        // The rows live in a plain flipped container instead of the stack view
+        // being the document view directly: a scroll view does not derive its
+        // document height from Auto Layout constraints, so a constrained stack
+        // stays at its fitting size and never scrolls. Frames are laid out by
+        // hand here, and `viewDidLayout` re-syncs the width on every resize.
+        sidebarScroll.drawsBackground = false
+        // Toggled in `syncSidebarRowWidths`: shown only while the rows overflow,
+        // so a short window is scrollable without a permanent gutter on a tall one.
+        sidebarScroll.hasVerticalScroller = false
+        sidebarScroll.autohidesScrollers = false
+        sidebarScroll.borderType = .noBorder
+        // Overlay: the knob only appears while scrolling and never steals width
+        // from the rows. The legacy gutter rendered a heavy dark rail on the
+        // translucent sidebar.
+        sidebarScroll.scrollerStyle = .overlay
+        sidebarScroll.verticalScrollElasticity = .allowed
+        sidebarScroll.horizontalScrollElasticity = .none
+        sidebarScroll.translatesAutoresizingMaskIntoConstraints = false
+        sidebarScroll.documentView = sidebarRowsContainer
+        sidebar.addSubview(sidebarScroll)
+
+        // Bottom padding so the last row is never flush against the window edge
+        // (it read as "cut off" when the list ended exactly at the border).
+        var y: CGFloat = 0
         for (index, spec) in specs.enumerated() {
             let row = SettingsSidebarRowView(title: spec.title, symbol: spec.symbol,
                                              colors: spec.colors) { [weak self] in
                 self?.selectPage(index)
             }
+            row.translatesAutoresizingMaskIntoConstraints = true
+            row.frame = NSRect(x: 0, y: y, width: Self.sidebarWidth - 24,
+                               height: SettingsSidebarRowView.rowHeight)
             sidebarRows.append(row)
-            rowsStack.addArrangedSubview(row)
-            row.widthAnchor.constraint(equalTo: sidebar.widthAnchor, constant: -24).isActive = true
+            sidebarRowsContainer.addSubview(row)
+            y += SettingsSidebarRowView.rowHeight + 2
+        }
+        sidebarRowsContainer.frame = NSRect(x: 0, y: 0,
+                                            width: Self.sidebarWidth - 24,
+                                            height: max(y - 2, 1) + 10)
+        // The scroll view only learns its clip width after the first layout
+        // pass, so the rows are re-widened there instead of at build time.
+        sidebarScroll.onLayout = { [weak self] in
+            self?.syncSidebarRowWidths()
         }
 
         // -- Content column ---------------------------------------------------
@@ -296,9 +352,12 @@ final class SettingsWindowController: NSWindowController {
             sidebarSeparator.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 12),
             sidebarSeparator.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -12),
             sidebarSeparator.topAnchor.constraint(equalTo: identityRow.bottomAnchor, constant: 14),
-            rowsStack.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 12),
-            rowsStack.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -12),
-            rowsStack.topAnchor.constraint(equalTo: sidebarSeparator.bottomAnchor, constant: 8),
+            sidebarScroll.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 12),
+            sidebarScroll.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -12),
+            sidebarScroll.topAnchor.constraint(equalTo: sidebarSeparator.bottomAnchor, constant: 8),
+            // Bottom-pinned so the scroller runs to the window edge and the list
+            // can never be clipped by a short window.
+            sidebarScroll.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor, constant: -8),
 
             titleLabel.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor,
                                                 constant: Self.contentMargin),
@@ -461,6 +520,10 @@ final class SettingsWindowController: NSWindowController {
         guard currentPage === generalPage else { return }
         launchAtLoginError = nil
         refreshLaunchAtLoginState()
+    }
+
+    @objc private func settingsWindowWillClose(_ notification: Notification) {
+        commitNetWatchEdits()
     }
 
     /// Re-reads SMAppService and repaints the checkbox / status / deep link.
@@ -1197,13 +1260,33 @@ final class SettingsWindowController: NSWindowController {
         if inputSourcePage != nil, pages[index] === inputSourcePage {
             refreshInputSourceState()
         }
+        // NetWatch: re-read the live phase and the installed VPN/app lists.
+        if let netWatchPage, pages[index] === netWatchPage.view {
+            netWatchPage.refresh()
+        }
         resizeWindowToFit()
+    }
+
+    /// Persist any half-finished edit before the window goes away, so a value
+    /// typed without pressing Return or clicking elsewhere is not lost.
+    func commitPendingEdits() {
+        netWatchPage?.commitPendingEdits()
+    }
+
+    private func commitNetWatchEdits() {
+        commitPendingEdits()
     }
 
     /// ⌥-click on the Finder toolbar icon opens settings straight onto the
     /// terminal page (go2shell parity: its ⌥-click shows the terminal picker).
     func selectTerminalSection() {
         guard let index = specs.firstIndex(where: { $0.title == "终端" }) else { return }
+        selectPage(index)
+    }
+
+    /// Menu entry: open settings on the 网络守护 page.
+    func selectNetWatchSection() {
+        guard let index = specs.firstIndex(where: { $0.title == "网络守护" }) else { return }
         selectPage(index)
     }
 
@@ -1240,13 +1323,49 @@ final class SettingsWindowController: NSWindowController {
         guard let window, let content = window.contentView else { return }
         content.layoutSubtreeIfNeeded()
         let fitting = content.fittingSize
-        let size = NSSize(width: max(Self.minWindowWidth, fitting.width),
-                          height: max(420, fitting.height))
+        // The sidebar must never be the reason the window is too short: grow to
+        // fit its rows (the list still scrolls when the screen cannot hold it).
+        var height = max(420, fitting.height)
+        let sidebarNeeded = Self.sidebarChromeHeight + sidebarRowsContainer.frame.height
+        let screenMax = (window.screen ?? NSScreen.main)?.visibleFrame.height ?? 900
+        height = max(height, min(sidebarNeeded, screenMax - 40))
+        let size = NSSize(width: max(Self.minWindowWidth, fitting.width), height: height)
         let top = window.frame.maxY
         window.setContentSize(size)
         var frame = window.frame
         frame.origin.y = top - frame.height
         window.setFrame(frame, display: true)
+        // The sidebar scroller only gets its real height after the resize.
+        syncSidebarRowWidths()
+    }
+
+    /// Keeps the hand-laid-out sidebar rows as wide as the scroll view's clip
+    /// view, and shows the scrollbar only while the list actually overflows.
+    ///
+    /// Runs on every layout pass instead of relying on constraints — a scroll
+    /// view's document view has no Auto Layout height contract, so the rows and
+    /// the document size are set by hand.
+    private func syncSidebarRowWidths() {
+        let clipHeight = sidebarScroll.contentView.bounds.height
+        let contentHeight = sidebarRowsContainer.frame.height
+        guard clipHeight > 0, contentHeight > 0 else { return }
+
+        // A permanent scroller gutter on a short list reads as a glitch, so it
+        // is only shown when it can actually scroll.
+        let overflows = contentHeight > clipHeight + 0.5
+        if sidebarScroll.hasVerticalScroller != overflows {
+            sidebarScroll.hasVerticalScroller = overflows
+        }
+
+        let width = sidebarScroll.contentView.bounds.width
+        guard width > 0 else { return }
+        guard abs(sidebarRowsContainer.frame.width - width) > 0.5 else { return }
+        sidebarRowsContainer.frame.size.width = width
+        for row in sidebarRows {
+            var frame = row.frame
+            frame.size.width = width
+            row.frame = frame
+        }
     }
 
     /// `JJType 1.1.0 (2)` — three-part marketing version plus the build number.
@@ -1874,12 +1993,38 @@ extension SettingsWindowController: NSTableViewDataSource, NSTableViewDelegate {
 
 // MARK: - Sidebar row
 
+/// Top-left origin container, so hand-positioned rows stack downward from y=0
+/// (a plain NSView would measure y from the BOTTOM of the document view).
+final class FlippedContainerView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+/// A scroll view that reports every layout pass.
+///
+/// A scroll view derives its document size from the document view's FRAME, not
+/// from Auto Layout, so the sidebar rows cannot be constraint-driven. They are
+/// positioned by hand and re-widened from `onLayout` — the clip view width is
+/// only correct once the window has been sized, which happens after the initial
+/// constraint pass.
+final class LayoutReportingScrollView: NSScrollView {
+    var onLayout: (() -> Void)?
+
+    override func layout() {
+        super.layout()
+        onLayout?()
+    }
+}
+
 /// One sidebar entry: tinted icon tile + title, highlighted while selected
 /// (accent-tinted rounded fill, re-resolved on appearance changes).
 /// Exposes itself as an accessibility BUTTON so VoiceOver / keyboard /
 /// automation can switch pages (the old segmented control was pressable —
 /// a plain NSView is not, which was an a11y regression).
 final class SettingsSidebarRowView: NSView {
+    /// Fixed row height. The sidebar list is laid out by frame inside a
+    /// scrolling container, so this must stay a constant the container can add up.
+    static let rowHeight: CGFloat = 36
+
     private let rowTitle: String
     private let onSelect: () -> Void
     private var isSelected = false {
@@ -1890,16 +2035,19 @@ final class SettingsSidebarRowView: NSView {
          onSelect: @escaping () -> Void) {
         self.rowTitle = title
         self.onSelect = onSelect
-        super.init(frame: NSRect(x: 0, y: 0, width: 180, height: 36))
-        translatesAutoresizingMaskIntoConstraints = false
+        super.init(frame: NSRect(x: 0, y: 0, width: 180, height: Self.rowHeight))
+        // Frame-based: the scrolling sidebar container positions these rows by
+        // hand, so Auto Layout must not fight it over height.
+        translatesAutoresizingMaskIntoConstraints = true
         wantsLayer = true
-        setContentHuggingPriority(.required, for: .vertical)
-        setContentCompressionResistancePriority(.required, for: .vertical)
-        heightAnchor.constraint(equalToConstant: 36).isActive = true
 
         let tile = IconTileView(symbol: symbol, side: 22, colors: colors)
         let label = NSTextField(labelWithString: title)
         label.font = .systemFont(ofSize: 13, weight: .medium)
+        // Shrink instead of overflow: a longer page title must never run into
+        // the sidebar edge, or be clipped by it.
+        label.lineBreakMode = .byTruncatingTail
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let row = NSStackView(views: [tile, label])
         row.spacing = 9
         row.translatesAutoresizingMaskIntoConstraints = false
@@ -1907,6 +2055,7 @@ final class SettingsSidebarRowView: NSView {
         NSLayoutConstraint.activate([
             row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
             row.centerYAnchor.constraint(equalTo: centerYAnchor),
+            row.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -8),
         ])
     }
 

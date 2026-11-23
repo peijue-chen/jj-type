@@ -25,6 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let captureOverlay = CaptureOverlayController()
     private let keepAwake = KeepAwakeService()
     private let inputSourceKeeper = InputSourceKeeper.shared
+    private let netWatch = NetWatchService.shared
 
     private var resultPanel: ResultPanelController?
     private var translationWindow: TranslationWindowController?
@@ -82,6 +83,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         keepAwake.onChanged = { [weak self] in
             self?.refreshKeepAwakeUI()
         }
+        // Network watchdog: starts itself when the saved config is enabled.
+        netWatch.onStatusChanged = { [weak self] in
+            MainActor.assumeIsolated { self?.rebuildStatusMenu() }
+        }
+        netWatch.configure(store: settingsStore)
         // Clipboard recording runs for the whole session; the panel reads the
         // current entries each time it opens.
         ClipboardHistoryService.shared.start()
@@ -233,9 +239,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // Flush any half-typed settings field before the process goes away; a
+        // text field only reports back on Return / focus loss.
+        settingsWindow?.commitPendingEdits()
         // Carbon hotkeys are released with the process; nothing to clean up manually.
         // caffeinate children are NOT killed with their parent — stop them here.
         keepAwake.shutdown()
+        // Stop the watchdog timer so no probe fires during teardown.
+        netWatch.stop()
         // Never let a voice outlive the app.
         SpeechService.shared.stop()
     }
@@ -324,6 +335,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                      action: #selector(openDevToolWindow), keyEquivalent: "").target = self
         menu.addItem(keepAwakeMenuItem())
         menu.addItem(inputSourceMenuItem())
+        menu.addItem(netWatchMenuItem())
 
         if !settingsStore.launchItems.isEmpty {
             let parent = NSMenuItem(title: "快捷启动", action: nil, keyEquivalent: "")
@@ -469,6 +481,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func stopKeepAwake() {
         keepAwake.disable()
+    }
+
+    // MARK: - Network watchdog
+
+    /// 「网络守护」submenu: enable toggle, live phase, manual check / switch and
+    /// a shortcut to the settings page. Every action is also reachable by click
+    /// so the watchdog is usable without remembering a hotkey.
+    private func netWatchMenuItem() -> NSMenuItem {
+        let config = netWatch.config
+        let title = config.enabled ? "网络守护 · \(netWatch.phase.title)" : "网络守护"
+        let parent = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+
+        let toggle = NSMenuItem(title: "启用网络守护", action: #selector(toggleNetWatch(_:)), keyEquivalent: "")
+        toggle.target = self
+        toggle.state = config.enabled ? .on : .off
+        submenu.addItem(toggle)
+
+        submenu.addItem(.separator())
+
+        let check = NSMenuItem(title: "立即检查", action: #selector(checkNetWatch), keyEquivalent: "")
+        check.target = self
+        check.isEnabled = config.enabled
+        submenu.addItem(check)
+
+        let switchNow = NSMenuItem(title: "立即切换备用网络", action: #selector(switchNetWatchNow), keyEquivalent: "")
+        switchNow.target = self
+        switchNow.isEnabled = config.enabled
+        submenu.addItem(switchNow)
+
+        submenu.addItem(.separator())
+
+        let settings = NSMenuItem(title: "网络守护设置…", action: #selector(openNetWatchSettings), keyEquivalent: "")
+        settings.target = self
+        submenu.addItem(settings)
+
+        parent.submenu = submenu
+        return parent
+    }
+
+    @objc private func toggleNetWatch(_ sender: NSMenuItem) {
+        var config = netWatch.config
+        config.enabled.toggle()
+        netWatch.updateConfig(config)
+        rebuildStatusMenu()
+    }
+
+    @objc private func checkNetWatch() {
+        netWatch.checkNow()
+    }
+
+    @objc private func switchNetWatchNow() {
+        netWatch.switchNow()
+    }
+
+    @objc private func openNetWatchSettings() {
+        openSettings()
+        settingsWindow?.selectNetWatchSection()
     }
 
     // MARK: - Input source keeper

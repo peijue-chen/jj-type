@@ -9,3 +9,5 @@ xcuserdata/
 # macOS
 .DS_Store
 mode.json
+build-debug
+.codebuddy
