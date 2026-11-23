@@ -1,6 +1,6 @@
 {
-  "updatedAt": "2026-11-17T07:57:03.436Z",
+  "updatedAt": "2026-11-23T10:08:34.156Z",
   "command": "update",
-  "gitHead": "4abf8c3646659f60913e2e3d5972d1dfeacd7a8d",
+  "gitHead": "bddf4ee0d63de42ab3b584ee2b35858dc2e7cdad",
   "model": "openrouter/deepseek/deepseek-v4-flash"
 }

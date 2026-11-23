@@ -3,7 +3,7 @@ type: Architecture
 title: jj-type Architecture Overview
 description: How JJType is structured — MainActor-first concurrency, the AppDelegate integration spine, window level ordering, and the persistence model across UserDefaults and Keychain.
 tags: [jjtype, architecture, appkit, concurrency]
-timestamp: "2026-11-05T10:22:00+08:00"
+timestamp: "2026-12-07"
 ---
 
 # Architecture Overview
@@ -33,7 +33,7 @@ Build flags default **everything to MainActor** (`SWIFT_DEFAULT_ACTOR_ISOLATION 
 
 ## AppDelegate — the integration spine
 
-`AppDelegate` owns (or lazily creates) every major controller: `HotkeyManager`, `TextCaptureService`, `AIClient`, `CaptureOverlayController`, `KeepAwakeService`, and the lazily-created window controllers (`ResultPanelController`, `TranslationWindowController`, `LauncherWindowController`, `SettingsWindowController`, `ClipboardHistoryPanelController`, `QRWindowController`, `DevToolWindowController`).
+`AppDelegate` owns (or lazily creates) every major controller: `HotkeyManager`, `TextCaptureService`, `AIClient`, `CaptureOverlayController`, `KeepAwakeService`, `InputSourceKeeper`, `NetWatchService`, and the lazily-created window controllers (`ResultPanelController`, `TranslationWindowController`, `LauncherWindowController`, `SettingsWindowController`, `ClipboardHistoryPanelController`, `QRWindowController`, `DevToolWindowController`).
 
 Key coordination points:
 
@@ -59,11 +59,11 @@ Special case: a pin's right-click pop-up menu lives at level 101, below `screenS
 
 Settings are split by sensitivity:
 
-- **UserDefaults (`jjtype.*` keys)** — `SettingsStore` (`jj-type/Core/SettingsStore.swift`) persists providers, active provider id, per-action hotkeys, launch items, AI quick actions, capture save directory/format, color-picker history (capped 12), selection-bar toggle, preferred terminal, and guidance flags. Window frames are persisted under explicit keys (`jjtype.translationWindowFrame`, `jjtype.qrWindowFrame`).
-- **Keychain** — `KeychainStore` (`jj-type/Core/KeychainStore.swift`) stores API keys only, service `com.aigens.jj-type.provider`, account = provider UUID. Keys never touch UserDefaults. Deleting a provider asks first because the Keychain key is unrecoverable.
-- **Files** — clipboard history persists to `~/Library/Application Support/JJType/ClipboardHistory/` (`index.json` + `<uuid>.png`); screenshots save to `~/Pictures/JJType/`; the Finder-terminal diagnostic log goes to `~/Library/Logs/JJType/finder-terminal.log` (256 KB rotation); AI diagnostics go to `~/Library/Logs/JJType/ai.log` (256 KB rotation, same convention via `DiagnosticLog` in `jj-type/Core/DiagnosticLog.swift`).
+- **UserDefaults (`jjtype.*` keys)** — `SettingsStore` (`jj-type/Core/SettingsStore.swift`) persists providers, active provider id, per-action hotkeys, launch items, AI quick actions, capture save directory/format, color-picker history (capped 12), selection-bar toggle, preferred terminal, input-source keeper config, NetWatch config, and guidance flags. Window frames are persisted under explicit keys (`jjtype.translationWindowFrame`, `jjtype.qrWindowFrame`).
+- **Keychain** — `KeychainStore` (`jj-type/Core/KeychainStore.swift`) stores API keys only, service `com.aigens.jj-type.provider`, account = provider UUID. Wi-Fi passwords use a separate service `com.aigens.jj-type.netwatch`, account = SSID. Keys never touch UserDefaults. Deleting a provider asks first because the Keychain key is unrecoverable.
+- **Files** — clipboard history persists to `~/Library/Application Support/JJType/ClipboardHistory/` (`index.json` + `<uuid>.png`); the NetWatch webhook offline queue goes to `~/Library/Application Support/JJType/NetWatchQueue.json`; screenshots save to `~/Pictures/JJType/`; the Finder-terminal diagnostic log goes to `~/Library/Logs/JJType/finder-terminal.log` (256 KB rotation); AI diagnostics go to `~/Library/Logs/JJType/ai.log` (256 KB rotation, same convention via `DiagnosticLog` in `jj-type/Core/DiagnosticLog.swift`).
 
-Change propagation is callback-driven: `SettingsStore.onProvidersChanged` rebuilds the menu, `onHotkeyChanged`/`onLaunchItemsChanged` re-register hotkeys, and `KeepAwakeService.onChanged` refreshes the status icon/menu section.
+Change propagation is callback-driven: `SettingsStore.onProvidersChanged` rebuilds the menu, `onHotkeyChanged`/`onLaunchItemsChanged` re-register hotkeys, `KeepAwakeService.onChanged` refreshes the status icon/menu section, `InputSourceKeeper.onChanged` rebuilds the input-source menu, and `NetWatchService.onStatusChanged` rebuilds the watchdog menu section.
 
 ## Source map (top level)
 
@@ -73,17 +73,20 @@ jj-type/
   Core/           AIClient, PromptBuilder, LanguageRouter, HotkeyManager,
                   SettingsStore, KeychainStore, TextCaptureService,
                   SpeechService, PhoneticService, LaunchAtLoginService,
-                  DiagnosticLog
+                  InputSourceKeeper, DiagnosticLog
   Translate/      ResultPanelController, TranslationWindowController
   Launcher/       LauncherWindowController, LaunchItem, SystemCommand,
                   FinderTerminal, AppIndex
   ClipboardHistory/  ClipboardHistoryService, ClipboardHistoryPanelController
-  ScreenCapture/  14 files — capture session, annotations, OCR, exporter
+  ScreenCapture/  14 files + ScreenCapturePermission — capture session,
+                  annotations, OCR, exporter
   SelectionAction/  QuickAction, SelectionActionBarController
+  NetWatch/       6 files — service, config, probes, webhook, settings page, log
   Tools/          KeepAwakeService, EyedropperController, QRService,
                   QRWindowController, DevToolWindowController
   Settings/       SettingsWindowController, Theme, HotkeyRecorderView
-  Permissions/    AccessibilityPermission, AutomationPermission
+  Permissions/    AccessibilityPermission, AutomationPermission,
+                  ScreenCapturePermission
 ```
 
 ## Open questions / watch items

@@ -3,7 +3,7 @@ type: Operations
 title: Build, Versioning & Release
 description: How to build JJType (Debug / universal Release), the versioning + CHANGELOG rules every change must follow, the app-icon pipeline, and the scheduled OpenWiki CI workflow.
 tags: [jjtype, build, release, versioning, ci]
-timestamp: "2026-11-05T10:34:00+08:00"
+timestamp: "2026-12-07"
 ---
 
 # Build, Versioning & Release
@@ -46,7 +46,7 @@ Every code change ships with a version bump AND a `CHANGELOG.md` entry. Do not b
 - **`CHANGELOG.md`**: newest release on top, `## [x.y.z] — YYYY-MM-DD`, grouped `Added` / `Changed` / `Fixed` / `Removed`. Write what the user sees (Chinese, like the UI), not the diff.
 - **Procedure for any behavior-changing task:** pick the bump → update `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` → add the CHANGELOG section → build → done. A CHANGELOG entry without the matching build-setting change (or the reverse) is a defect.
 
-Release history at a glance (CHANGELOG.md): 1.0 baseline menu-bar translation → 1.1 settings footer + Swift 6 concurrency fixes → 1.2 launcher + quick-launch → 1.3 search fallbacks + index TTL → 1.4 system commands + empty-trash fallback chain → 1.5 Finder toolbar terminal + automation guide → 1.6 selection bar, clipboard history, QR, eyedropper, keep-awake, quick AI actions → 1.7 visual overhaul + feature-folder source reorg → 1.8 dev tool window, clipboard single-item delete, startup speed, Finder terminal root-cause fix (NSAppleEventsUsageDescription) → 1.9 TTS/phonetic/accent color/launch-at-login → 1.10 in-prompt spelling repair for translations, DevToolWindow TextKit 2 large-document optimization.
+Release history at a glance (CHANGELOG.md): 1.0 baseline menu-bar translation → 1.1 settings footer + Swift 6 concurrency fixes → 1.2 launcher + quick-launch → 1.3 search fallbacks + index TTL → 1.4 system commands + empty-trash fallback chain → 1.5 Finder toolbar terminal + automation guide → 1.6 selection bar, clipboard history, QR, eyedropper, keep-awake, quick AI actions → 1.7 visual overhaul + feature-folder source reorg → 1.8 dev tool window, clipboard single-item delete, startup speed, Finder terminal root-cause fix (NSAppleEventsUsageDescription) → 1.9 TTS/phonetic/accent color/launch-at-login → 1.10 in-prompt spelling repair for translations, DevToolWindow TextKit 2 large-document optimization → 1.11 input-source keeper (输入法守护) + launch-at-login polish → 1.12 NetWatch network watchdog (backup Wi-Fi failover, VPN restart, webhook, keep-awake display-sleep toggle) + extensive bug-fix batch → 1.13 NetWatch heartbeat notifications + README screenshots + CHANGELOG formatting.
 
 ## App icon pipeline
 

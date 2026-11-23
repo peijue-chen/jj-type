@@ -3,7 +3,7 @@ type: Capability
 title: Utilities — Keep Awake, Eyedropper, QR, Dev Tools, Clipboard History
 description: "JJType's background utilities: caffeinate keep-awake sessions, the ⌥P eyedropper, QR generation/recognition windows, the ⌥J developer tool window, and the clipboard history recorder."
 tags: [jjtype, tools, clipboard, qr, devtools]
-timestamp: "2026-11-05T10:28:00+08:00"
+timestamp: "2026-12-07"
 ---
 
 # Utilities
@@ -13,6 +13,8 @@ timestamp: "2026-11-05T10:28:00+08:00"
 ## Keep awake (防休眠)
 
 `KeepAwakeService` spawns `/usr/bin/caffeinate -d -i -s` as a child — **indefinite by design, no `-t` cap** (product decision). Menu offers 30 min / 1 h / 2 h timers with a minute-level countdown; the status icon swaps to a coffee cup while active. `shutdown()` SIGTERMs + run-loop pumps at quit so no orphan survives; termination handlers hop via `Task { @MainActor }` with a process-identity check so stale handlers from replaced sessions are ignored.
+
+**Display sleep policy (1.12.0)**: A new 允许息屏 toggle (default ON) in the menu submenu controls whether `caffeinate` gets the `-d` flag. When ON, only `-i -s` are passed — the display turns off normally, the lock screen is not brightened, and the network watchdog (NetWatch) keeps running in the background. When OFF, `-d` is added, keeping the screen on at all times. The `-d` flag asserts `PreventUserIdleDisplaySleep`, which means the lock screen content is visible to anyone walking past, so the default is OFF for `-d`. Toggling the policy replaces the `caffeinate` session and resets the countdown timer.
 
 ## Eyedropper (⌥P)
 
