@@ -26,7 +26,7 @@ final class SettingsWindowController: NSWindowController {
     }
 
     private let specs: [PageSpec] = [
-        PageSpec(title: "通用", subtitle: "开机自启与系统集成",
+        PageSpec(title: "通用", subtitle: "开机自启、日志与系统集成",
                  symbol: "gearshape.fill",
                  colors: [NSColor(red: 0.36, green: 0.40, blue: 0.47, alpha: 1),
                           NSColor(red: 0.55, green: 0.60, blue: 0.68, alpha: 1)]),
@@ -483,7 +483,21 @@ final class SettingsWindowController: NSWindowController {
                          + "建议先把它拖进「应用程序」再开启。"))
         }
 
-        let page = makePage([card])
+        // Diagnostics that are otherwise invisible in a release build (its
+        // NSLog does not reach the unified log): the watchdog, AI requests and
+        // the Finder-terminal toolbar all append to ~/Library/Logs/JJType.
+        let logsButton = Theme.button("打开日志文件夹", symbol: "folder")
+        logsButton.target = self
+        logsButton.action = #selector(openLogsFolder)
+        logsButton.toolTip = "在 Finder 中打开 \(DiagnosticLog.logURL.deletingLastPathComponent().path)"
+
+        let logsCard = Theme.card()
+        logsCard.content.addArrangedSubview(makeSectionHeader("日志"))
+        logsCard.content.addArrangedSubview(logsButton)
+        logsCard.content.addArrangedSubview(makeHint(
+            "诊断日志都在 ~/Library/Logs/JJType：netwatch.log（网络守护）、ai.log（AI 请求）、finder-terminal.log（Finder 终端）。"))
+
+        let page = makePage([card, logsCard])
         generalPage = page
         refreshLaunchAtLoginState(refit: false)
         return page
@@ -512,6 +526,14 @@ final class SettingsWindowController: NSWindowController {
 
     @objc private func openLoginItemsSettings() {
         LaunchAtLoginService.openSystemSettings()
+    }
+
+    /// Reveals `~/Library/Logs/JJType` in Finder. The directory is derived from
+    /// the shared log path so it stays correct if the location ever changes.
+    @objc private func openLogsFolder() {
+        let directory = DiagnosticLog.logURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(directory)
     }
 
     /// The user may have flipped the login item in System Settings while this
