@@ -58,6 +58,14 @@ final class NetWatchService {
     private(set) var lastError: String?
     private(set) var lastProbeDetail = ""
 
+    /// Last layer written to the log and when. A healthy 30 s tick used to
+    /// append an identical "overseasOK" line every time (204 of 282 lines in a
+    /// real log), which rotated away the incident that actually mattered.
+    private var lastLoggedLayer: String?
+    private var lastLoggedAt: Date?
+    /// Throttles the "backupSSID empty" skip line during a long outage.
+    private var lastSkipLogAt: Date?
+
     /// Anchor for the heartbeat interval. Reset on start and on every recovery,
     /// so the count always begins at the moment the network came back — a
     /// heartbeat is never sent right after a recovery notification.
@@ -151,6 +159,10 @@ final class NetWatchService {
     }
 
     func stop() {
+        // Idempotent: the settings page saves on every keystroke and calls
+        // updateConfig() each time, so a disabled watchdog used to append
+        // "service stopped" dozens of times in a row.
+        guard timer != nil || phase != .disabled else { return }
         timer?.invalidate()
         timer = nil
         endActivity()
@@ -167,6 +179,9 @@ final class NetWatchService {
         lastError = nil
         heartbeatClock = nil
         heartbeatRetryAt = nil
+        lastLoggedLayer = nil
+        lastLoggedAt = nil
+        lastSkipLogAt = nil
         phase = .disabled
         NetWatchLog.note("service stopped")
         publishStatus()
@@ -269,9 +284,19 @@ final class NetWatchService {
     /// VPN service.
     private func handle(connectivity: Connectivity, config: NetWatchConfig) {
         isChecking = false
+        // A probe can outlive a stop() (the watchdog was disabled while the
+        // request was in flight). Acting on it would flip the phase back to
+        // .healthy and show "正常" while the timer is already gone.
+        guard self.config.enabled else { return }
         lastCheck = Date()
         lastProbeDetail = connectivity.detail
-        NetWatchLog.note("check layer=\(layerName(connectivity)) detail=\(connectivity.detail)")
+        // A layer change always logs; a repeated layer logs once per 30 min
+        // when healthy and once per 5 min when degraded, so a long outage stays
+        // readable without flooding the file.
+        let shouldLog = shouldLogCheck(connectivity)
+        if shouldLog {
+            NetWatchLog.note("check layer=\(layerName(connectivity)) detail=\(connectivity.detail)")
+        }
 
         switch connectivity {
         case .overseasOK:
@@ -308,7 +333,9 @@ final class NetWatchService {
         case .localOnly(let domestic, let overseas):
             // The whole network is fine, only the road abroad is broken.
             // Switching Wi-Fi would be pointless — restart OpenVPN instead.
-            NetWatchLog.note("overseas unreachable (\(overseas)) but domestic ok → \(config.vpnTestEnabled ? "restart vpn" : "vpn checks disabled")")
+            if shouldLog {
+                NetWatchLog.note("overseas unreachable (\(overseas)) but domestic ok → \(config.vpnTestEnabled ? "restart vpn" : "vpn checks disabled")")
+            }
             consecutiveFailures = 0
             outageStart = nil
             guard config.vpnTestEnabled else {
@@ -320,7 +347,7 @@ final class NetWatchService {
                 lastError = "国外不可访问：国内正常（\(domestic)），国外失败（\(overseas)）"
                 break
             }
-            handleVPNDown(config: config, overseasBlocked: true)
+            handleVPNDown(config: config, overseasBlocked: true, shouldLog: shouldLog)
             if config.webhookEnabled {
                 Task { await NetWatchWebhook.flush(urlString: config.webhookURL) }
             }
@@ -329,7 +356,9 @@ final class NetWatchService {
             // Not even the domestic internet works. Do not call any API yet —
             // this is the "switch to the backup line, then bring the VPN up"
             // road, which is exactly what runSwitch() does.
-            NetWatchLog.note("no link (\(reason)) → backup network path")
+            if shouldLog {
+                NetWatchLog.note("no link (\(reason)) → backup network path")
+            }
             consecutiveFailures += 1
             if outageStart == nil {
                 outageStart = Date()
@@ -353,6 +382,24 @@ final class NetWatchService {
         case .localOnly: return "localOnly"
         case .overseasOK: return "overseasOK"
         }
+    }
+
+    /// Rate-limits the per-tick "check" lines: true on a layer change, or when
+    /// the current layer has not been logged for its interval (30 min healthy,
+    /// 5 min degraded). Keeps the log proportional to events, not to ticks.
+    private func shouldLogCheck(_ connectivity: Connectivity) -> Bool {
+        let layer = layerName(connectivity)
+        let healthy: Bool
+        if case .overseasOK = connectivity { healthy = true } else { healthy = false }
+        let interval: TimeInterval = healthy ? 30 * 60 : 5 * 60
+        let now = Date()
+        if layer == lastLoggedLayer, let last = lastLoggedAt,
+           now.timeIntervalSince(last) < interval {
+            return false
+        }
+        lastLoggedLayer = layer
+        lastLoggedAt = now
+        return true
     }
 
     /// Seconds since the outage started (0 when the network never went down).
@@ -474,7 +521,7 @@ final class NetWatchService {
     /// `overseasBlocked` is true when the overseas URL failed while the domestic
     /// one answered — a half-open tunnel is the most likely cause, so the
     /// restart goes straight to SIGKILL instead of the graceful `--quit`.
-    private func handleVPNDown(config: NetWatchConfig, overseasBlocked: Bool) {
+    private func handleVPNDown(config: NetWatchConfig, overseasBlocked: Bool, shouldLog: Bool) {
         if vpnDownStart == nil {
             vpnDownStart = Date()
             NetWatchLog.note("overseas blocked detected (domestic ok) — will restart vpn")
@@ -488,7 +535,9 @@ final class NetWatchService {
             return
         }
         let elapsed = Date().timeIntervalSince(vpnDownStart)
-        NetWatchLog.note("overseas blocked \(Int(elapsed))s / \(config.vpnGraceSeconds)s")
+        if shouldLog {
+            NetWatchLog.note("overseas blocked \(Int(elapsed))s / \(config.vpnGraceSeconds)s")
+        }
         guard elapsed >= Double(config.vpnGraceSeconds) else { return }
         Task { [weak self] in
             await self?.restartVPNOnly(config: config, hardFirst: overseasBlocked)
@@ -507,7 +556,13 @@ final class NetWatchService {
         guard config.enabled, !isSwitching else { return }
         guard !config.backupSSID.isEmpty else {
             lastError = "未配置备用 Wi-Fi"
-            NetWatchLog.note("switch skipped: backupSSID empty")
+            // A misconfigured watchdog retries on every tick, so this line
+            // would otherwise repeat for the whole outage. A manual click
+            // always logs; the automatic path logs once per 5 min.
+            if manual || lastSkipLogAt.map({ Date().timeIntervalSince($0) >= 300 }) ?? true {
+                lastSkipLogAt = Date()
+                NetWatchLog.note("switch skipped: backupSSID empty")
+            }
             return
         }
         isSwitching = true
