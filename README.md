@@ -239,4 +239,4 @@ API Key 只保存在系统钥匙串，不会写进配置文件。
 
 ## 更新日志
 
-版本变更见 [CHANGELOG.md](CHANGELOG.md)。当前版本：**1.13.0**。
+版本变更见 [CHANGELOG.md](CHANGELOG.md)。当前版本：**1.13.1**。

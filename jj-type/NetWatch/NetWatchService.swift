@@ -44,6 +44,16 @@ enum NetWatchPhase: Equatable {
         default: return false
         }
     }
+
+    /// A real outage (link/switch/VPN), as opposed to a healthy tick or a
+    /// transient state. Used to decide whether returning to `.healthy` counts
+    /// as a recovery worth re-anchoring the heartbeat window for.
+    var isOutage: Bool {
+        switch self {
+        case .networkDown, .switching, .failed, .vpnDown, .recovering: return true
+        case .disabled, .healthy: return false
+        }
+    }
 }
 
 @MainActor
@@ -66,15 +76,38 @@ final class NetWatchService {
     /// Throttles the "backupSSID empty" skip line during a long outage.
     private var lastSkipLogAt: Date?
 
-    /// Anchor for the heartbeat interval. Reset on start and on every recovery,
-    /// so the count always begins at the moment the network came back — a
-    /// heartbeat is never sent right after a recovery notification.
-    private(set) var heartbeatClock: Date?
+    /// Anchor for the heartbeat interval, PERSISTED (`UserDefaults`) so an app
+    /// restart does not silently restart the count.
+    ///
+    /// Memory-only was a real failure mode: with a 2 h interval and an app that
+    /// is relaunched (or restarted by an update) more often than that, every
+    /// start re-anchored to "now" and the heartbeat never came due at all.
+    /// It is still re-anchored on a REAL recovery (so a heartbeat never lands
+    /// right after a recovery notification) and on wake from sleep.
+    private(set) var heartbeatClock: Date? {
+        didSet {
+            if let heartbeatClock {
+                UserDefaults.standard.set(heartbeatClock.timeIntervalSince1970,
+                                          forKey: Self.heartbeatClockKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: Self.heartbeatClockKey)
+            }
+        }
+    }
+
+    private static let heartbeatClockKey = "netWatch.heartbeatClock"
     /// Last time a heartbeat webhook was actually delivered (shown in the UI).
     private(set) var lastHeartbeatSent: Date?
     /// After a failed heartbeat send, wait this long before trying again so a
     /// broken endpoint is not hammered on every 30 s tick.
     private var heartbeatRetryAt: Date?
+    /// Why the last heartbeat evaluation declined to send. Logged ONCE per
+    /// change (not per tick) — a silent `guard` with no log line is what made
+    /// "heartbeats stopped and nothing was recorded" undebuggable.
+    private var heartbeatSkippedReason: String?
+    /// `NSWorkspace.didWakeNotification` token, so the observer is installed
+    /// once and removed on stop().
+    private var wakeObserver: NSObjectProtocol?
 
     /// Fired on every state change so the menu can rebuild.
     var onStatusChanged: (() -> Void)?
@@ -94,7 +127,28 @@ final class NetWatchService {
     private var isRestartingVPN = false
     private var isRecovering = false
     private var consecutiveFailures = 0
-    private var outageStart: Date?
+    /// When the CURRENT outage began, PERSISTED (`UserDefaults`) so a `kill -9`
+    /// during an outage does not restart the 断网判定 countdown.
+    ///
+    /// In-memory only was a real gap: the app was killed mid-outage, and on
+    /// relaunch `outageStart` was nil again, so the watchdog waited the FULL
+    /// `outageThresholdSeconds` (10 min by default) before switching to the
+    /// backup network — even though the network had already been down for
+    /// hours. A switch is exactly what the user wants most while the app is
+    /// being restarted.
+    ///
+    /// Bounded by `outageStaleLimit`: an anchor older than that is dropped,
+    /// because the Mac may have been asleep or offline in another network for
+    /// days and "an outage that started 3 days ago" is fiction (and would fire
+    /// a switch notification with a nonsense duration).
+    private var outageStart: Date? {
+        didSet { persistOutageStart() }
+    }
+    private static let outageStartKey = "netWatch.outageStart"
+    /// A persisted outage older than 24 h is ignored on start: too old to be
+    /// the same incident.
+    private static let outageStaleLimit: TimeInterval = 24 * 60 * 60
+
     private var vpnDownStart: Date?
     private var lastSwitchAttempt: Date?
     private var backoffUntil: Date?
@@ -133,12 +187,33 @@ final class NetWatchService {
             stop()
         }
 
-        // Turning the heartbeat on starts a fresh interval instead of firing
-        // immediately on the next tick just because the app has been running
-        // for a while.
+        // A heartbeat switch only acts when the toggle actually FLIPPED, and
+        // never resets an anchor that is already counting: the settings page
+        // only calls updateConfig() on a save, so a refresh of this page must
+        // not throw the current window away.
         if !previous.heartbeatEnabled, sanitized.heartbeatEnabled {
-            heartbeatClock = Date()
+            // Just switched on: a fresh interval instead of firing right away
+            // on the next tick. A persisted anchor from an earlier session is
+            // honoured (start() decides), so this is only the in-session case.
+            if heartbeatClock == nil { heartbeatClock = Date() }
             heartbeatRetryAt = nil
+            heartbeatSkippedReason = nil
+            NetWatchLog.note("heartbeat enabled")
+        } else if previous.heartbeatEnabled, !sanitized.heartbeatEnabled {
+            heartbeatSkippedReason = nil
+            NetWatchLog.note("heartbeat disabled")
+        } else if previous.heartbeatEnabled, sanitized.heartbeatEnabled,
+                  previous.heartbeatIntervalSeconds != sanitized.heartbeatIntervalSeconds {
+            // A SHORTER interval must not wait out the old one: with 2 h
+            // configured and a change to 10 min, the next heartbeat would
+            // otherwise be hours away. Re-anchor only when the new interval has
+            // not already elapsed, so an already-due heartbeat is not postponed
+            // and the next tick sends it.
+            let interval = TimeInterval(max(sanitized.heartbeatIntervalSeconds, 60))
+            let elapsed = heartbeatClock.map { Date().timeIntervalSince($0) } ?? interval
+            if elapsed < interval { heartbeatClock = Date() }
+            heartbeatRetryAt = nil
+            NetWatchLog.note("heartbeat interval changed to \(sanitized.heartbeatIntervalSeconds)s")
         }
 
         publishStatus()
@@ -148,9 +223,43 @@ final class NetWatchService {
         guard config.enabled else { return }
         guard timer == nil else { return }
         phase = .healthy
-        // First heartbeat lands one full interval after the service starts.
-        heartbeatClock = Date()
+        // Resume the persisted anchor instead of restarting the count: only a
+        // FIRST run (no stored anchor) or a stale one (app was off far longer
+        // than the interval — sending "still running" for a process that was
+        // not running would be a lie) starts a fresh window.
         heartbeatRetryAt = nil
+        heartbeatSkippedReason = nil
+        let stored = UserDefaults.standard.double(forKey: Self.heartbeatClockKey)
+        let interval = TimeInterval(max(config.heartbeatIntervalSeconds, 60))
+        if stored > 0 {
+            let anchor = Date(timeIntervalSince1970: stored)
+            let age = Date().timeIntervalSince(anchor)
+            if age >= 0, age < interval * 2 {
+                heartbeatClock = anchor
+                NetWatchLog.note("heartbeat anchor restored (age \(Int(age))s)")
+            } else {
+                heartbeatClock = Date()
+                NetWatchLog.note("heartbeat anchor too old (\(Int(age))s), restarting")
+            }
+        } else {
+            // First heartbeat lands one full interval after the service starts.
+            heartbeatClock = Date()
+        }
+        // Resume an outage that was already in progress when this process died.
+        // Without it a `kill -9` mid-outage restarted the whole 断网判定
+        // countdown, delaying the backup-Wi-Fi switch the user was waiting for.
+        restoreOutageStart()
+        // While the Mac sleeps the timer does not fire, so a nap longer than
+        // the interval would otherwise swallow a whole heartbeat window and
+        // send the next one only after ANOTHER full interval. Re-anchor on
+        // wake: the heartbeat then resumes on the normal cadence.
+        if wakeObserver == nil {
+            wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.handleWake() }
+            }
+        }
         beginActivity()
         scheduleTimer()
         NetWatchLog.note("service started interval=\(config.checkIntervalSeconds)s")
@@ -158,33 +267,94 @@ final class NetWatchService {
         publishStatus()
     }
 
-    func stop() {
+    /// Stops the watchdog.
+    ///
+    /// `preservingOutage` distinguishes the two very different reasons for
+    /// stopping:
+    ///   - the USER disabled the watchdog → the outage (if any) is not ours to
+    ///     remember; re-enabling must start from a clean slate, otherwise a
+    ///     stale `needsRecovery` / `outageStart` would switch Wi-Fi the moment
+    ///     the toggle comes back on.
+    ///   - the PROCESS is going away (quit / app update / relaunch) → an outage
+    ///     that is in progress must SURVIVE, exactly like the `kill -9` case,
+    ///     or a relaunch mid-outage waits out a whole fresh threshold.
+    func stop(preservingOutage: Bool = false) {
         // Idempotent: the settings page saves on every keystroke and calls
         // updateConfig() each time, so a disabled watchdog used to append
         // "service stopped" dozens of times in a row.
         guard timer != nil || phase != .disabled else { return }
         timer?.invalidate()
         timer = nil
+        if let wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+            self.wakeObserver = nil
+        }
         endActivity()
         // Drop every transient state: re-enabling later must start from a clean
         // slate, otherwise a stale `needsRecovery` / `outageStart` would fire a
         // VPN restart and an app launch the user never triggered.
         needsRecovery = false
         consecutiveFailures = 0
-        outageStart = nil
+        if !preservingOutage {
+            // Clearing this also erases the PERSISTED anchor (see didSet).
+            outageStart = nil
+        }
         vpnDownStart = nil
         lastSwitchAttempt = nil
         backoffUntil = nil
         isChecking = false
         lastError = nil
-        heartbeatClock = nil
+        // A quit/relaunch keeps the heartbeat anchor for the same reason as the
+        // outage anchor: an app restarted more often than the interval would
+        // otherwise never reach a heartbeat. The anchor is still bounded on
+        // start() (see restore), so a long absence cannot replay an old window.
+        if !preservingOutage {
+            heartbeatClock = nil
+        }
         heartbeatRetryAt = nil
+        heartbeatSkippedReason = nil
         lastLoggedLayer = nil
         lastLoggedAt = nil
         lastSkipLogAt = nil
         phase = .disabled
         NetWatchLog.note("service stopped")
         publishStatus()
+    }
+
+    // MARK: - Outage persistence
+
+    private func persistOutageStart() {
+        if let outageStart {
+            UserDefaults.standard.set(outageStart.timeIntervalSince1970,
+                                      forKey: Self.outageStartKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.outageStartKey)
+        }
+    }
+
+    /// Reloads the outage anchor written by a previous process.
+    ///
+    /// The value is READ BEFORE any assignment: `outageStart`'s `didSet`
+    /// rewrites the stored key, so clearing the property first would delete the
+    /// very value being restored (an easy self-inflicted bug).
+    private func restoreOutageStart() {
+        let stored = UserDefaults.standard.double(forKey: Self.outageStartKey)
+        guard stored > 0 else { return }
+        let anchor = Date(timeIntervalSince1970: stored)
+        let age = Date().timeIntervalSince(anchor)
+        if age < 0 || age > Self.outageStaleLimit {
+            // Drop the stale default so the next real outage starts clean.
+            outageStart = nil
+            NetWatchLog.note("outage anchor discarded (age \(Int(age))s)")
+            return
+        }
+        // Restored as a SUSPICION only: the probe this start() triggers decides
+        // whether the network is really still down, and `handle()` clears the
+        // anchor on the first `.overseasOK` tick. Marking it here means a still
+        // broken network switches to the backup Wi-Fi immediately instead of
+        // waiting out a fresh threshold.
+        outageStart = anchor
+        NetWatchLog.note("outage anchor restored (in progress for \(Int(age))s)")
     }
 
     // MARK: - Manual actions
@@ -304,11 +474,18 @@ final class NetWatchService {
             // other than `.healthy` means the network just came back, and the
             // heartbeat window must restart from that moment.
             let wasHealthy = phase == .healthy
+            // A real link/VPN outage (as opposed to a transient blip) — see
+            // the heartbeat note below.
+            let wasDown = phase.isOutage
             consecutiveFailures = 0
+            // READ THE DURATION BEFORE CLEARING THE ANCHOR. This used to be the
+            // other way round, so `outageDuration` always saw a nil start and
+            // the recovery notification reported "未能确定中断时长" for every
+            // real outage.
+            let outage = outageDuration
             outageStart = nil
             if needsRecovery {
                 needsRecovery = false
-                let outage = outageDuration
                 Task { [weak self] in
                     await self?.runRecovery(config: config, connectivity: connectivity,
                                             outageSeconds: outage)
@@ -321,9 +498,21 @@ final class NetWatchService {
                 vpnRestartFailures = 0
                 vpnRestartBackoffUntil = nil
             }
-            if !wasHealthy {
+            // Only a genuine RECOVERY re-anchors the heartbeat. A transient
+            // flip into `localOnly`/`vpnDown` (a VPN reconnect hiccup, which is
+            // common overnight) used to reset the clock on every return, so
+            // with a long interval the heartbeat could be postponed forever —
+            // the exact "one heartbeat at 2 am, then nothing" symptom.
+            //
+            // `wasDown` is the second half of the fix: an `.overseasOK` probe
+            // after a long outage is a real recovery and deserves a fresh
+            // window (the recovery notification just went out), but a flip
+            // back from a brief `localOnly`/`failed` blip must not defer a
+            // heartbeat that is already due.
+            if !wasHealthy, wasDown {
                 heartbeatClock = Date()
                 heartbeatRetryAt = nil
+                NetWatchLog.note("heartbeat anchor reset after recovery")
             }
             if config.webhookEnabled {
                 Task { await NetWatchWebhook.flush(urlString: config.webhookURL) }
@@ -430,23 +619,37 @@ final class NetWatchService {
     /// only meaningful "now", so a failed one must NOT enter the offline queue
     /// and get replayed hours later next to a real alert.
     private func maybeSendHeartbeat(config: NetWatchConfig) {
-        guard config.heartbeatEnabled,
-              config.webhookEnabled,
-              !config.webhookURL.isEmpty,
-              !needsRecovery,
-              phase == .healthy else { return }
-
         let now = Date()
-        if let heartbeatRetryAt, now < heartbeatRetryAt { return }
+
+        // Every rejection reason is logged once per change. A bare `return`
+        // used to make a stalled heartbeat invisible in netwatch.log.
+        func skip(_ reason: String) {
+            guard heartbeatSkippedReason != reason else { return }
+            heartbeatSkippedReason = reason
+            NetWatchLog.note("heartbeat skipped: \(reason)")
+        }
+
+        guard config.heartbeatEnabled else { return skip("disabled") }
+        guard config.webhookEnabled, !config.webhookURL.isEmpty else {
+            return skip("webhook disabled or URL empty")
+        }
+        guard !needsRecovery, phase == .healthy else {
+            return skip("not healthy (phase=\(phase.title) needsRecovery=\(needsRecovery))")
+        }
+        if let heartbeatRetryAt, now < heartbeatRetryAt {
+            return skip("retry backoff until \(Int(heartbeatRetryAt.timeIntervalSince(now)))s")
+        }
 
         guard let clock = heartbeatClock else {
             heartbeatClock = now
-            return
+            return skip("no anchor yet, starting a fresh interval")
         }
 
         let interval = TimeInterval(max(config.heartbeatIntervalSeconds, 60))
         let elapsed = now.timeIntervalSince(clock)
         guard elapsed >= interval else { return }
+
+        heartbeatSkippedReason = nil
 
         // Claim the slot before the async send so a slow webhook cannot make
         // the next tick send a second heartbeat.
@@ -465,6 +668,7 @@ final class NetWatchService {
             guard let self else { return }
             if ok {
                 self.lastHeartbeatSent = Date()
+                self.heartbeatSkippedReason = nil
                 NetWatchLog.note("heartbeat sent")
                 // Refresh the settings page / menu so 「上次心跳」 updates.
                 self.publishStatus()
@@ -700,6 +904,8 @@ final class NetWatchService {
             // not immediately after the recovery notification.
             heartbeatClock = Date()
             heartbeatRetryAt = nil
+            heartbeatSkippedReason = nil
+            NetWatchLog.note("heartbeat anchor reset after recovery completed")
         } else {
             phase = .failed(reason: "恢复后 VPN 或 App 启动失败")
             lastError = "恢复后 VPN 或 App 启动失败"
@@ -820,6 +1026,35 @@ final class NetWatchService {
     private func notify(config: NetWatchConfig, message: NetWatchMessage) async {
         guard config.webhookEnabled, !config.webhookURL.isEmpty else { return }
         await NetWatchWebhook.deliver(urlString: config.webhookURL, message: message)
+    }
+
+    // MARK: - Wake
+
+    /// Re-anchors the heartbeat clock after the Mac wakes from sleep.
+    ///
+    /// A repeating `Timer` does NOT fire during sleep and coalesces the missed
+    /// fires into one on wake, so `heartbeatClock` could be hours stale: the
+    /// heartbeat would then be due immediately (one notification right after
+    /// waking, often in the middle of the night) and, if the tick after it was
+    /// interrupted, the cadence was lost for the rest of the session. Treating
+    /// the wake as a fresh anchor keeps the interval honest — one heartbeat per
+    /// interval of AWAKE time, never a burst on wake.
+    ///
+    /// The clock is only re-anchored, not the whole state: a real outage that
+    /// started before the sleep must be detected normally by the probe this
+    /// wake triggers.
+    private func handleWake() {
+        guard config.enabled, timer != nil else { return }
+        let now = Date()
+        let gap = heartbeatClock.map { now.timeIntervalSince($0) } ?? 0
+        NetWatchLog.note("woke from sleep, heartbeat anchor reset (gap \(Int(gap))s)")
+        heartbeatClock = now
+        heartbeatRetryAt = nil
+        heartbeatSkippedReason = nil
+        // Probe right away: the network almost always changed while asleep
+        // (Wi-Fi re-associated, VPN dropped), and waiting a full check
+        // interval would report a stale "正常".
+        checkNow()
     }
 
     // MARK: - Timer

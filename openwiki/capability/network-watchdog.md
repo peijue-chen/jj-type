@@ -75,9 +75,19 @@ When `.localOnly` persists past the VPN grace threshold, the watchdog:
 
 Failed restarts use **exponential backoff** (2 → 4 → 8 → ... → max 30 min) to avoid hammering the system.
 
-## Heartbeat (1.13.0)
+## Heartbeat (1.13.0, hardened in 1.13.1)
 
-Periodic "still running" webhook that fires on the normal probe tick — **no dedicated timer**. The heartbeat clock resets on every recovery and on service start, so a heartbeat is never sent right after a recovery notification. `heartbeatClock` measures elapsed time from the last healthy probe; once it exceeds `heartbeatInterval` (default 7200 s), one heartbeat is sent and the clock advances by one interval. Failures use a 5-minute retry window only (never enter the offline queue — a stale "still running" message is misleading hours later).
+Periodic "still running" webhook that fires on the normal probe tick — **no dedicated timer**. `heartbeatClock` measures elapsed time from the last anchor; once it exceeds `heartbeatInterval` (default 7200 s), one heartbeat is sent and the clock advances to now. Failures use a 5-minute retry window only (never enter the offline queue — a stale "still running" message is misleading hours later).
+
+**Anchor rules (1.13.1)** — these exist because the heartbeat used to stall silently:
+
+- **Persisted** to `UserDefaults` (`netWatch.heartbeatClock`). An app restart (kill -9, update reload, quit/relaunch) no longer restarts the count. An anchor older than 2 × interval is discarded on start, because reporting "still running" for a process that was not running is a lie.
+- **Re-anchored only on a REAL recovery** — `NetWatchPhase.isOutage` (networkDown / switching / failed / vpnDown / recovering) returning to healthy. A brief `localOnly`/`vpnDown` blip no longer resets the window; with a 2 h interval and frequent VPN hiccups, that reset was postponing the heartbeat forever.
+- **Re-anchored on wake** (`NSWorkspace.didWakeNotification` → `handleWake()`), which also probes immediately. A sleeping `Timer` coalesces missed fires into one, so a nap crossing the interval used to deliver a single stale heartbeat right after waking — the notorious "one notification at 2 am".
+- **Shortened interval** takes effect at once: re-anchor only if the new interval has not already elapsed, so an already-due heartbeat is not postponed.
+- Every rejection is logged **once per change** (`heartbeat skipped: <reason>`), so a stalled heartbeat is visible in `netwatch.log`. The old silent `guard` made this undebuggable.
+
+**Outage anchor (1.13.1)**: `outageStart` is also persisted (`netWatch.outageStart`, 24 h stale limit) so a process restart mid-outage does not restart the 断网判定 countdown — the backup-Wi-Fi switch resumes immediately instead of waiting another full threshold. `stop(preservingOutage:)` distinguishes a user disabling the watchdog (clears both anchors) from the process going away (`AppDelegate.applicationWillTerminate` passes `true`, keeping them).
 
 ## Offline queue
 

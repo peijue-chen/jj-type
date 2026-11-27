@@ -245,8 +245,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Carbon hotkeys are released with the process; nothing to clean up manually.
         // caffeinate children are NOT killed with their parent — stop them here.
         keepAwake.shutdown()
-        // Stop the watchdog timer so no probe fires during teardown.
-        netWatch.stop()
+        // Stop the watchdog timer so no probe fires during teardown. An outage
+        // in progress is preserved: quitting (or relaunching after an update)
+        // mid-outage must not restart the 断网判定 countdown on the next launch.
+        netWatch.stop(preservingOutage: true)
         // Never let a voice outlive the app.
         SpeechService.shared.stop()
     }

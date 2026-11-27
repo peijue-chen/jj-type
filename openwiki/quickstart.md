@@ -48,7 +48,7 @@ The repo is a single Xcode project (`jj-type.xcodeproj`) with all Swift sources 
 - **Explicit entry point** — `jj-type/App/main.swift`; the `@main` AppKit bootstrap is broken on the macOS 26 beta / Xcode 26.1 toolchain and must not be switched back.
 - **Everything defaults to MainActor** — `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` + `SWIFT_APPROACHABLE_CONCURRENCY = YES`; C callbacks (Carbon) hop via `MainActor.assumeIsolated`; heavy work (capture, OCR, JSON parse, flattening) is `nonisolated` or detached.
 - **API keys live only in Keychain** (service `com.aigens.jj-type.provider`, account = provider UUID); UserDefaults (`jjtype.*`) holds non-secret settings.
-- **Current version:** 1.13.0 (per `project.pbxproj` `MARKETING_VERSION`).
+- **Current version:** 1.13.1 (per `project.pbxproj` `MARKETING_VERSION`).
 
 ## Gotchas to know before editing
 
